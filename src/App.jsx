@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { SUPABASE_READY, loadFromSupabase, saveToSupabase } from "./supabaseClient";
 
 // ─── All unique buyer names from existing data ───
 const KNOWN_BUYERS = [
@@ -364,7 +365,75 @@ export default function App() {
   const addLog = (msg, snapshot) => setLogs(prev => [{ id: Date.now(), time: Date.now(), msg, snapshot }, ...prev].slice(0, 100));
   const snap = () => JSON.parse(JSON.stringify(events));
 
-  useEffect(() => { try { window.localStorage?.setItem?.("tkm-v3", JSON.stringify(events)); window.localStorage?.setItem?.("tkm-v3-names", JSON.stringify(buyerNames)); window.localStorage?.setItem?.("tkm-v3-logs", JSON.stringify(logs)); } catch {} }, [events, buyerNames, logs]);
+  // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
+  const [syncStatus, setSyncStatus] = useState(SUPABASE_READY ? "loading" : "offline");
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const initialLoadDone = useRef(false);
+  const saveTimer = useRef(null);
+
+  // 1) On mount: try to load from Supabase, if newer than local then replace local
+  useEffect(() => {
+    if (!SUPABASE_READY) { initialLoadDone.current = true; return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await loadFromSupabase();
+        if (cancelled) return;
+        if (res && res.payload) {
+          const p = res.payload;
+          if (Array.isArray(p.events)) setEvents(p.events);
+          if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
+          if (Array.isArray(p.logs)) setLogs(p.logs);
+          setLastSyncedAt(res.updatedAt);
+        }
+        setSyncStatus("saved");
+      } catch (e) {
+        console.warn("Initial load failed:", e);
+        setSyncStatus("error");
+      } finally {
+        initialLoadDone.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // 2) On change: save to localStorage immediately + debounced save to Supabase
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem?.("tkm-v3", JSON.stringify(events));
+      window.localStorage?.setItem?.("tkm-v3-names", JSON.stringify(buyerNames));
+      window.localStorage?.setItem?.("tkm-v3-logs", JSON.stringify(logs));
+    } catch {}
+
+    // Skip the very first effect run (which fires before initial Supabase load completes)
+    if (!SUPABASE_READY || !initialLoadDone.current) return;
+    setSyncStatus("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const res = await saveToSupabase({ events, buyerNames, logs });
+      if (res.ok) { setSyncStatus("saved"); setLastSyncedAt(new Date().toISOString()); }
+      else { setSyncStatus("error"); }
+    }, 800); // wait 0.8s after last change to batch saves
+  }, [events, buyerNames, logs]);
+
+  // 3) Manual refetch (用於手機更新後想立刻拉電腦的最新資料)
+  const refetchFromCloud = async () => {
+    if (!SUPABASE_READY) return;
+    setSyncStatus("loading");
+    try {
+      const res = await loadFromSupabase();
+      if (res && res.payload) {
+        const p = res.payload;
+        if (Array.isArray(p.events)) setEvents(p.events);
+        if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
+        if (Array.isArray(p.logs)) setLogs(p.logs);
+        setLastSyncedAt(res.updatedAt);
+      }
+      setSyncStatus("saved");
+    } catch {
+      setSyncStatus("error");
+    }
+  };
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -791,6 +860,17 @@ export default function App() {
           <div style={{ display:"flex",alignItems:"baseline",gap:10 }}>
             <span style={{ fontSize:20,fontWeight:700,letterSpacing:1 }}>票券管家</span>
             <span style={{ fontSize:11,color:"#8b7355",fontWeight:500 }}>TICKET MANAGER</span>
+            {SUPABASE_READY && (
+              <button onClick={refetchFromCloud} title={lastSyncedAt?`最後同步：${new Date(lastSyncedAt).toLocaleString("zh-TW")}\n點擊從雲端重新載入`:"從雲端重新載入"}
+                style={{ marginLeft:6,padding:"3px 9px",borderRadius:10,border:"none",cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:"inherit",
+                  background: syncStatus==="error"?"#7a3030":syncStatus==="saving"||syncStatus==="loading"?"#8b7355":"#3a5a3a",
+                  color:"#faf9f6" }}>
+                {syncStatus==="loading"?"⟳ 載入中":syncStatus==="saving"?"⟳ 同步中":syncStatus==="saved"?"☁ 已同步":syncStatus==="error"?"⚠ 同步失敗":"○ 離線"}
+              </button>
+            )}
+            {!SUPABASE_READY && (
+              <span title="尚未設定雲端，資料只存本機" style={{ marginLeft:6,padding:"3px 9px",borderRadius:10,fontSize:10,fontWeight:700,background:"#555",color:"#bbb" }}>○ 本機</span>
+            )}
           </div>
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {[{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
