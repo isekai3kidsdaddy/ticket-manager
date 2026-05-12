@@ -365,6 +365,7 @@ export default function App() {
   const [priceVal, setPriceVal] = useState("");
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
+  const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
   const fileInputRef = useRef(null);
 
   const addLog = (msg, snapshot) => setLogs(prev => [{ id: Date.now(), time: Date.now(), msg, snapshot }, ...prev].slice(0, 100));
@@ -1145,11 +1146,11 @@ export default function App() {
                           )}
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
-                            const isOpen = expandedId === `identity-${ekey}`;
+                            const isOpen = expandedIdentity === ekey;
                             return (
                               <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
                                 <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                                  <button onClick={()=>setExpandedId(isOpen?null:`identity-${ekey}`)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
+                                  <button onClick={()=>setExpandedIdentity(isOpen?null:ekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
                                   <span style={{ fontSize:12,fontWeight:700,color:it.name?"#2d2a26":"#bbb" }}>{it.name || "(未填姓名)"}</span>
                                   {it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
                                   {it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
