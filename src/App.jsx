@@ -66,6 +66,11 @@ function countStatusBatches(buyers, st) {
   return (buyers || []).reduce((s, b) => s + getBatches(b).filter(x => x.st === st).length, 0);
 }
 
+// 場次中「需X但還沒收X」的人數
+function countPendingFlag(buyers, needFlag, gotFlag) {
+  return (buyers || []).filter(b => b[needFlag] && !b[gotFlag]).length;
+}
+
 // Inline editor for creating/editing a single batch (qty + status + detail)
 function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onCancel, canEditQty = true }) {
   const [qty, setQty] = useState(initialQty || 1);
@@ -520,6 +525,58 @@ export default function App() {
     updateEvent(eventId, e => { e.buyers[idx] = { ...e.buyers[idx], ...updates }; return e; });
   };
 
+  // Toggle 各種勾選；勾掉「需要/前提」時自動清掉相關「完成」狀態
+  const toggleBuyerFlag = (eventId, idx, flag) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const labels = { needRealName:"需實名", gotRealName:"已收實名", needSid:"需SID", gotSid:"已收SID", ticketDelivered:"已給票", photoReceived:"已收回傳照" };
+    const next = !b[flag];
+    addLog(`【${evt.name}】${b.name}:${labels[flag]} ${next?"✅":"取消"}`, snap());
+    updateEvent(eventId, e => {
+      const nb = { ...e.buyers[idx], [flag]: next };
+      if (flag === "needRealName" && !next) nb.gotRealName = false;
+      if (flag === "needSid" && !next) nb.gotSid = false;
+      if (flag === "ticketDelivered" && !next) nb.photoReceived = false;
+      if (flag === "gotRealName" && next) nb.needRealName = true;
+      if (flag === "gotSid" && next) nb.needSid = true;
+      if (flag === "photoReceived" && next) nb.ticketDelivered = true;
+      e.buyers[idx] = nb; return e;
+    });
+  };
+
+  // 實名資料 CRUD（一個訂購人可有多筆）
+  const addIdentity = (eventId, idx) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    addLog(`【${evt.name}】${b.name}:新增一筆實名資料`, snap());
+    updateEvent(eventId, e => {
+      const list = Array.isArray(e.buyers[idx].identities) ? [...e.buyers[idx].identities] : [];
+      list.push({ id: Date.now()+Math.random(), name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"" });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list, needRealName: true };
+      return e;
+    });
+  };
+  const updateIdentity = (eventId, idx, identityId, updates) => {
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => it.id === identityId ? { ...it, ...updates } : it);
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  const removeIdentity = (eventId, idx, identityId) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const it = (b.identities || []).find(x => x.id === identityId);
+    setConfirmModal({ msg: `確定要刪除這筆實名資料嗎?\n${it?.name || "(未命名)"}`, onYes: () => {
+      addLog(`【${evt.name}】${b.name}:刪除實名資料 ${it?.name || ""}`, snap());
+      updateEvent(eventId, e => {
+        e.buyers[idx] = { ...e.buyers[idx], identities: (e.buyers[idx].identities || []).filter(x => x.id !== identityId) };
+        return e;
+      });
+      setConfirmModal(null);
+    } });
+  };
+
   const migrateBuyer = (b) => {
     if (Array.isArray(b.batches) && b.batches.length > 0) return b;
     const batches = getBatches(b);
@@ -846,6 +903,7 @@ export default function App() {
     <div style={{ fontFamily: "'Zen Kaku Gothic New','Noto Sans TC',system-ui,sans-serif", background: "#f2f0eb", minHeight: "100vh", color: "#2d2a26" }}>
       <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet" />
       <style>{`
+        html,body{zoom:1.3}
         *{box-sizing:border-box} @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}} .anim-in{animation:fadeIn .2s ease-out}
         input:focus,select:focus{border-color:#8b7355!important;outline:none}
         .qty-btn{width:28px;height:28px;border-radius:7px;border:1.5px solid #d4d0c8;background:#fff;font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;color:#2d2a26;font-family:inherit}
@@ -873,9 +931,12 @@ export default function App() {
             )}
           </div>
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
-            {[{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
+            {(() => {
+              const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
-            ))}
+              ));
+            })()}
             <div style={{ width:1,height:20,background:"#555",margin:"0 4px" }}/>
             <button onClick={()=>setShowLog(!showLog)} style={{ padding:"7px 14px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:showLog?"#8b7355":"transparent",color:showLog?"#fff":"#a09888",position:"relative" }}>
               📋 紀錄{logs.length>0&&!showLog&&<span style={{ position:"absolute",top:2,right:2,width:8,height:8,borderRadius:4,background:"#c47070" }}/>}
@@ -952,6 +1013,9 @@ export default function App() {
                     <span style={{ fontSize:12,fontWeight:700,padding:"2px 10px",borderRadius:12,background:"#f0ede8",color:"#8b7355" }}>{buyerTotal} 張</span>
                     {hasUnpaid&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fce8e8",color:"#8b3a3a" }}>未付款</span>}
                     {hasRefund&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#f6f0e0",color:"#8b6a2d" }}>待退費</span>}
+                    {countPendingFlag(evt.buyers,"needRealName","gotRealName")>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fff3e0",color:"#a86a30" }}>📝待收實名 {countPendingFlag(evt.buyers,"needRealName","gotRealName")}</span>}
+                    {countPendingFlag(evt.buyers,"needSid","gotSid")>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fff3e0",color:"#a86a30" }}>🎟待收SID {countPendingFlag(evt.buyers,"needSid","gotSid")}</span>}
+                    {countPendingFlag(evt.buyers,"ticketDelivered","photoReceived")>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fff3e0",color:"#a86a30" }}>📸待回傳照 {countPendingFlag(evt.buyers,"ticketDelivered","photoReceived")}</span>}
                   </div>
                   {!isExp&&<div style={{ marginTop:6,display:"flex",flexWrap:"wrap",gap:4 }}>
                     {(evt.buyers||[]).slice(0,10).map((b,i)=>{
@@ -1008,6 +1072,125 @@ export default function App() {
                           <button onClick={()=>removeBuyer(evt.id,i)} style={{ width:26,height:26,borderRadius:6,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",color:"#c47070" }} title="移除">×</button>
                         </div>
                       </div>
+
+                      {/* 取票前資料：實名 / SID */}
+                      <div style={{ marginTop:6,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center" }}>
+                        {[
+                          { need:"needRealName", got:"gotRealName", label:"實名", icon:"📝" },
+                          { need:"needSid", got:"gotSid", label:"SID", icon:"🎟" },
+                        ].map(f => {
+                          const need = !!b[f.need], got = !!b[f.got];
+                          const pending = need && !got;
+                          return (
+                            <div key={f.need} style={{ display:"flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:8,background:pending?"#fff3e0":need?"rgba(255,255,255,.6)":"transparent",border:`1px solid ${pending?"#e6b87a":need?"#d4d0c8":"#e8e4dc"}` }}>
+                              <span style={{ fontSize:11,color:"#888",fontWeight:600 }}>{f.icon}{f.label}</span>
+                              <label style={{ display:"flex",alignItems:"center",gap:3,cursor:"pointer",fontSize:11,color:"#666" }}>
+                                <input type="checkbox" checked={need} onChange={()=>toggleBuyerFlag(evt.id,i,f.need)} style={{ cursor:"pointer",margin:0 }}/>
+                                需要
+                              </label>
+                              {need && (
+                                <label style={{ display:"flex",alignItems:"center",gap:3,cursor:"pointer",fontSize:11,color:got?"#3a7a3a":"#a86a30",fontWeight:got?700:600 }}>
+                                  <input type="checkbox" checked={got} onChange={()=>toggleBuyerFlag(evt.id,i,f.got)} style={{ cursor:"pointer",margin:0 }}/>
+                                  {got?"已收 ✅":"待收 ⏳"}
+                                </label>
+                              )}
+                            </div>
+                          );
+                        })}
+                        {/* 分票流程：已給票 / 已收回傳照 */}
+                        {(() => {
+                          const delivered = !!b.ticketDelivered, photo = !!b.photoReceived;
+                          const waitingPhoto = delivered && !photo;
+                          return (
+                            <div style={{ display:"flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:8,background:waitingPhoto?"#fff3e0":delivered?"rgba(255,255,255,.6)":"transparent",border:`1px solid ${waitingPhoto?"#e6b87a":delivered?"#d4d0c8":"#e8e4dc"}` }}>
+                              <span style={{ fontSize:11,color:"#888",fontWeight:600 }}>🎫分票</span>
+                              <label style={{ display:"flex",alignItems:"center",gap:3,cursor:"pointer",fontSize:11,color:"#666" }}>
+                                <input type="checkbox" checked={delivered} onChange={()=>toggleBuyerFlag(evt.id,i,"ticketDelivered")} style={{ cursor:"pointer",margin:0 }}/>
+                                已給票
+                              </label>
+                              {delivered && (
+                                <label style={{ display:"flex",alignItems:"center",gap:3,cursor:"pointer",fontSize:11,color:photo?"#3a7a3a":"#a86a30",fontWeight:photo?700:600 }}>
+                                  <input type="checkbox" checked={photo} onChange={()=>toggleBuyerFlag(evt.id,i,"photoReceived")} style={{ cursor:"pointer",margin:0 }}/>
+                                  {photo?"回傳照已收 ✅":"待回傳照 ⏳"}
+                                </label>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      {/* 實名資料清單（多筆）*/}
+                      {(b.needRealName || (b.identities && b.identities.length > 0)) && (() => {
+                        const idCount = (b.identities || []).length;
+                        const diff = idCount - totalQ;
+                        const matches = diff === 0;
+                        const short = diff < 0;
+                        return (
+                        <div style={{ marginTop:8,padding:"8px 10px",background:"rgba(255,255,255,.55)",borderRadius:8,border:"1px dashed #d4cdb8" }}>
+                          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
+                            <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 實名資料 ({idCount} / {totalQ})</span>
+                              {idCount > 0 && (
+                                matches
+                                  ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 筆數相符</span>
+                                  : short
+                                    ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#fce8e8",color:"#8b3a3a" }}>⚠ 還少 {-diff} 筆</span>
+                                    : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {diff} 筆</span>
+                              )}
+                            </div>
+                            <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增一筆</button>
+                          </div>
+                          {(!b.identities || b.identities.length === 0) && (
+                            <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有實名資料</div>
+                          )}
+                          {(b.identities||[]).map((it,k) => {
+                            const ekey = `${evt.id}_${i}_${it.id}`;
+                            const isOpen = expandedId === `identity-${ekey}`;
+                            return (
+                              <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
+                                <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+                                  <button onClick={()=>setExpandedId(isOpen?null:`identity-${ekey}`)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
+                                  <span style={{ fontSize:12,fontWeight:700,color:it.name?"#2d2a26":"#bbb" }}>{it.name || "(未填姓名)"}</span>
+                                  {it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
+                                  {it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
+                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                </div>
+                                {isOpen && (
+                                  <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
+                                    {[
+                                      { key:"name", label:"姓名", ph:"中文姓名" },
+                                      { key:"phone", label:"電話", ph:"09xx..." },
+                                      { key:"idNumber", label:"身分證", ph:"A123..." },
+                                      { key:"tixAccount", label:"拓元帳號", ph:"帳號 / Email" },
+                                      { key:"memberNo", label:"會員編號", ph:"" },
+                                    ].map(field => (
+                                      <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>{field.label}</span>
+                                        <input value={it[field.key]||""} onChange={e=>updateIdentity(evt.id,i,it.id,{[field.key]:e.target.value})} placeholder={field.ph}
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                      </label>
+                                    ))}
+                                    <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                      <span style={{ fontWeight:600 }}>登入方式</span>
+                                      <select value={it.loginVia||""} onChange={e=>updateIdentity(evt.id,i,it.id,{loginVia:e.target.value})}
+                                        style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}>
+                                        <option value="">未選</option>
+                                        <option value="facebook">Facebook</option>
+                                        <option value="google">Google</option>
+                                      </select>
+                                    </label>
+                                    <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:11,color:"#666",cursor:"pointer",alignSelf:"end",padding:"5px 0" }}>
+                                      <input type="checkbox" checked={!!it.locked} onChange={e=>updateIdentity(evt.id,i,it.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+                                      <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
+                                    </label>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        );
+                      })()}
 
                       {/* Batches */}
                       <div style={{ marginTop:8,display:"flex",flexDirection:"column",gap:6 }}>
@@ -1078,6 +1261,50 @@ export default function App() {
               </div>)}
             </div>);
           })}
+        </div>)}
+
+        {/* Pending (待收) view */}
+        {!showLog&&tab==="pending"&&(<div style={{ display:"flex",flexDirection:"column",gap:14 }}>
+          {(() => {
+            const activeOnly = events.filter(e => e.status === "active" || e.status === "picked");
+            const realNameItems = []; const sidItems = []; const photoItems = [];
+            activeOnly.forEach(evt => {
+              (evt.buyers || []).forEach((b, bi) => {
+                if (b.needRealName && !b.gotRealName) realNameItems.push({ evt, b, bi });
+                if (b.needSid && !b.gotSid) sidItems.push({ evt, b, bi });
+                if (b.ticketDelivered && !b.photoReceived) photoItems.push({ evt, b, bi });
+              });
+            });
+            const renderSection = (title, icon, color, bg, items, gotFlag) => (
+              <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${color}` }}>
+                <div style={{ padding:"12px 18px",background:bg,borderBottom:"1px solid #f0ede8",fontWeight:700,fontSize:15,color,display:"flex",alignItems:"baseline",gap:10 }}>
+                  <span>{icon} {title}</span>
+                  <span style={{ fontSize:12,fontWeight:500,color:"#999" }}>{items.length} 筆</span>
+                </div>
+                {items.length === 0 ? (
+                  <div style={{ padding:"20px",textAlign:"center",color:"#9b9588",fontSize:13 }}>沒有待收項目 🎉</div>
+                ) : (
+                  <div style={{ padding:"10px 14px",display:"flex",flexDirection:"column",gap:6 }}>
+                    {items.map(({evt,b,bi},i)=>(
+                      <div key={i} style={{ padding:"8px 12px",borderRadius:8,background:bg,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap" }}>
+                        <span style={{ fontWeight:700,fontSize:13,color:"#2d2a26",minWidth:0 }}>{b.name}</span>
+                        <span style={{ fontSize:12,color:"#666" }}>· {evt.name}</span>
+                        <span style={{ fontSize:11,color:"#999" }}>共 {buyerTotalQty(b)} 張</span>
+                        <button onClick={()=>toggleBuyerFlag(evt.id,bi,gotFlag)} style={{ marginLeft:"auto",padding:"4px 12px",borderRadius:7,border:`1px solid ${color}`,background:"#fff",fontSize:11,cursor:"pointer",fontWeight:700,color,fontFamily:"inherit" }}>標記為已收 ✅</button>
+                        <button onClick={()=>jumpToEvent(evt.id,evt.status)} style={{ padding:"4px 10px",borderRadius:7,border:"1px solid #d4d0c8",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>前往</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+            return (<>
+              {renderSection("待收實名資料","📝","#a86a30","#fff3e0",realNameItems,"gotRealName")}
+              {renderSection("待收 SID 碼","🎟","#7a5a8b","#f3edf8",sidItems,"gotSid")}
+              {renderSection("待回傳照片","📸","#3a7a8b","#e0f0f6",photoItems,"photoReceived")}
+              <div style={{ textAlign:"center",fontSize:11,color:"#a09888",padding:"6px 0" }}>* 統計範圍：進行中 + 已取票場次</div>
+            </>);
+          })()}
         </div>)}
 
         {/* Buyers (訂購人) view */}
