@@ -363,6 +363,8 @@ export default function App() {
   const [inputModal, setInputModal] = useState(null);
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
+  const [editingName, setEditingName] = useState(null);
+  const [nameVal, setNameVal] = useState("");
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
@@ -900,6 +902,16 @@ export default function App() {
   const startEditPrice = (evt, e) => { e.stopPropagation(); setEditingPrice(evt.id); setPriceVal(evt.price || ""); };
   const savePrice = (evtId) => { const evt = events.find(e => e.id === evtId); if (evt && priceVal !== evt.price) addLog(`【${evt.name}】票價 ${evt.price || "(空)"}→${priceVal || "(空)"}`, snap()); updateEvent(evtId, e => { e.price = priceVal; return e; }); setEditingPrice(null); };
 
+  const startEditName = (evt, e) => { e.stopPropagation(); setEditingName(evt.id); setNameVal(evt.name || ""); };
+  const saveName = (evtId) => {
+    const evt = events.find(e => e.id === evtId);
+    const trimmed = nameVal.trim();
+    if (!trimmed) { setEditingName(null); return; }
+    if (evt && trimmed !== evt.name) addLog(`場次改名:${evt.name} → ${trimmed}`, snap());
+    updateEvent(evtId, e => { e.name = trimmed; return e; });
+    setEditingName(null);
+  };
+
   return (
     <div style={{ fontFamily: "'Zen Kaku Gothic New','Noto Sans TC',system-ui,sans-serif", background: "#f2f0eb", minHeight: "100vh", color: "#2d2a26" }}>
       <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -1010,7 +1022,16 @@ export default function App() {
                 <div style={{ flex:1 }}>
                   <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                     {evt.status==="done"&&<span>✅</span>}{evt.status==="picked"&&<span>🎫</span>}
-                    <span style={{ fontWeight:700,fontSize:16 }}>{evt.name}</span>
+                    {editingName===evt.id?(
+                      <div onClick={e=>e.stopPropagation()} style={{ display:"flex",gap:4,alignItems:"center" }}>
+                        <input autoFocus value={nameVal} onChange={e=>setNameVal(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")saveName(evt.id);if(e.key==="Escape")setEditingName(null);}}
+                          style={{ width:200,padding:"4px 8px",borderRadius:6,border:"1.5px solid #8b7355",fontSize:16,fontFamily:"inherit",fontWeight:700 }}/>
+                        <button onClick={()=>saveName(evt.id)} style={{ padding:"3px 8px",borderRadius:5,border:"none",background:"#2d2a26",color:"#fff",fontSize:11,cursor:"pointer",fontWeight:700 }}>✓</button>
+                        <button onClick={()=>setEditingName(null)} style={{ padding:"3px 8px",borderRadius:5,border:"1px solid #ddd",background:"#fff",fontSize:11,cursor:"pointer",color:"#999" }}>✕</button>
+                      </div>
+                    ):(
+                      <span onClick={e=>startEditName(evt,e)} style={{ fontWeight:700,fontSize:16,cursor:"pointer",padding:"2px 6px",borderRadius:5,transition:"background 0.15s" }} onMouseEnter={e=>e.currentTarget.style.background="#f6f0e8"} onMouseLeave={e=>e.currentTarget.style.background="transparent"} title="點擊編輯名稱">{evt.name}</span>
+                    )}
                     <span style={{ fontSize:12,fontWeight:700,padding:"2px 10px",borderRadius:12,background:"#f0ede8",color:"#8b7355" }}>{buyerTotal} 張</span>
                     {hasUnpaid&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fce8e8",color:"#8b3a3a" }}>未付款</span>}
                     {hasRefund&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#f6f0e0",color:"#8b6a2d" }}>待退費</span>}
