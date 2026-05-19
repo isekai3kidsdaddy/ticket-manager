@@ -349,6 +349,140 @@ function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder 
   );
 }
 
+function IdentityExportModal({ events, title, onClose }) {
+  const [mode, setMode] = useState("text"); // text | sheet | csv
+  const [copied, setCopied] = useState(false);
+
+  // 收集所有實名資料 [{eventName, buyerName, identity}]
+  const rows = [];
+  (events || []).forEach(evt => {
+    (evt.buyers || []).forEach(b => {
+      (b.identities || []).forEach(it => {
+        rows.push({ eventName: evt.name, buyerName: b.name, ...it });
+      });
+    });
+  });
+  const totalIdentities = rows.length;
+
+  const loginLabel = (v) => v === "facebook" ? "FB" : v === "google" ? "Google" : "";
+
+  // 文字格式（給 LINE 看的，分場次分人）
+  const textOutput = (() => {
+    const lines = [];
+    (events || []).forEach(evt => {
+      const evtRows = (evt.buyers || []).flatMap(b =>
+        (b.identities || []).map(it => ({ buyerName: b.name, ...it }))
+      );
+      if (evtRows.length === 0) return;
+      lines.push(`📌 ${evt.name}（${evtRows.length} 筆）`);
+      let lastBuyer = "";
+      evtRows.forEach(r => {
+        if (r.buyerName !== lastBuyer) { lines.push(`【${r.buyerName}】`); lastBuyer = r.buyerName; }
+        const parts = [];
+        parts.push(`姓名:${r.name||"(未填)"}`);
+        if (r.phone) parts.push(`電話:${r.phone}`);
+        if (r.idNumber) parts.push(`身分證:${r.idNumber}`);
+        if (r.tixAccount) parts.push(`拓元:${r.tixAccount}`);
+        const login = loginLabel(r.loginVia);
+        if (login) parts.push(`登入:${login}`);
+        if (r.locked) parts.push(`🔒帳號鎖`);
+        if (r.memberNo) parts.push(`會員#:${r.memberNo}`);
+        lines.push("  " + parts.join(" / "));
+      });
+      lines.push("");
+    });
+    return lines.join("\n").trim();
+  })();
+
+  // Excel/Sheet 格式（tab 分隔）
+  const headers = ["場次","訂購人","姓名","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  const sheetOutput = (() => {
+    const lines = [headers.join("\t")];
+    rows.forEach(r => {
+      lines.push([r.eventName, r.buyerName, r.name||"", r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].join("\t"));
+    });
+    return lines.join("\n");
+  })();
+
+  // CSV
+  const csvOutput = (() => {
+    const escape = v => `"${String(v||"").replace(/"/g,'""')}"`;
+    const lines = [headers.map(escape).join(",")];
+    rows.forEach(r => {
+      lines.push([r.eventName, r.buyerName, r.name||"", r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].map(escape).join(","));
+    });
+    return lines.join("\n");
+  })();
+
+  const currentOutput = mode === "text" ? textOutput : mode === "sheet" ? sheetOutput : csvOutput;
+
+  const doCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(currentOutput);
+      setCopied(true);
+      setTimeout(()=>setCopied(false), 2000);
+    } catch (err) {
+      // Fallback: select all
+      alert("複製失敗，請手動全選複製");
+    }
+  };
+
+  const doDownload = () => {
+    const bom = "\uFEFF";
+    const blob = new Blob([bom + csvOutput], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0,10);
+    a.download = `實名資料_${title.replace(/[\\/:*?"<>|]/g,"_")}_${date}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:640,maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:12 }}>
+          <h3 style={{ margin:0, fontSize:17, fontWeight:700 }}>📋 實名資料輸出</h3>
+          <span style={{ fontSize:12, color:"#888" }}>{title} · 共 {totalIdentities} 筆</span>
+        </div>
+
+        {totalIdentities === 0 ? (
+          <div style={{ padding:"40px 20px",textAlign:"center",color:"#999",fontSize:14 }}>沒有實名資料可以輸出</div>
+        ) : (
+          <>
+            <div style={{ display:"flex",gap:4,marginBottom:10,padding:3,background:"#f0ede8",borderRadius:8 }}>
+              {[
+                { key:"text", label:"📱 LINE 文字" },
+                { key:"sheet", label:"📊 Excel/Sheet" },
+                { key:"csv", label:"📄 CSV 下載" },
+              ].map(t => (
+                <button key={t.key} onClick={()=>setMode(t.key)} style={{ flex:1,padding:"8px 12px",borderRadius:6,border:"none",background:mode===t.key?"#fff":"transparent",fontSize:12,fontWeight:700,cursor:"pointer",color:mode===t.key?"#2d2a26":"#888",fontFamily:"inherit",boxShadow:mode===t.key?"0 1px 3px rgba(0,0,0,.1)":"none" }}>{t.label}</button>
+              ))}
+            </div>
+
+            <div style={{ fontSize:11, color:"#888", marginBottom:6 }}>
+              {mode==="text" && "適合貼到 LINE。按複製後直接到對話框長按貼上。"}
+              {mode==="sheet" && "適合貼到 Excel / Google Sheet。按複製後到表格任一格 Ctrl+V，會自動分欄。"}
+              {mode==="csv" && "下載 CSV 檔（含 BOM，Excel 開不會亂碼），給場館或拓元上傳用。"}
+            </div>
+
+            <textarea readOnly value={currentOutput} style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #e4e0d8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
+
+            <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
+              <button onClick={onClose} style={{ padding:"8px 18px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>關閉</button>
+              {mode==="csv" ? (
+                <button onClick={doDownload} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>💾 下載 CSV</button>
+              ) : (
+                <button onClick={doCopy} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:copied?"#3a7a3a":"#2d2a26",color:"#faf9f6",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>{copied?"✓ 已複製":"📋 複製"}</button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
@@ -361,6 +495,7 @@ export default function App() {
   const [logs, setLogs] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-logs"); if (s) return JSON.parse(s); } catch {} return []; });
   const [confirmModal, setConfirmModal] = useState(null);
   const [inputModal, setInputModal] = useState(null);
+  const [identityExportModal, setIdentityExportModal] = useState(null); // { events:[evt], title }
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
   const [editingName, setEditingName] = useState(null);
@@ -984,6 +1119,7 @@ export default function App() {
             <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
             <button onClick={exportCSV} style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>匯出CSV</button>
             {tab==="active"&&<button onClick={exportImage} title="把進行中場次存成一張圖，可傳到 LINE 隨時查看" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d8c4a8",background:"#faf3e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>🖼️ 匯出圖片</button>}
+            <button onClick={()=>setIdentityExportModal({events:events.filter(e=>e.status==="active"||e.status==="picked"),title:"進行中+已取票"})} title="輸出進行中與已取票場次的所有實名資料" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出實名</button>
             <button onClick={exportBackup} title="匯出完整備份（JSON），可匯回" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #c4d9c4",background:"#f2f7f2",fontSize:12,cursor:"pointer",fontWeight:700,color:"#5a7a5a",fontFamily:"inherit" }}>💾 匯出備份</button>
             <button onClick={()=>fileInputRef.current?.click()} title="從備份檔還原資料" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #b8d4e8",background:"#eef6fa",fontSize:12,cursor:"pointer",fontWeight:700,color:"#2d6a8b",fontFamily:"inherit" }}>📥 匯入備份</button>
             <input type="file" ref={fileInputRef} accept=".json,application/json" style={{ display:"none" }} onChange={e=>{ const f=e.target.files?.[0]; if(f) handleImportFile(f); e.target.value=""; }}/>
@@ -1248,6 +1384,7 @@ export default function App() {
                 {evt.note&&<div style={{ marginTop:8,fontSize:12,color:"#8b7355",background:"#faf7f0",padding:"6px 10px",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center" }}><span>備註：{evt.note}</span><button onClick={()=>setInputModal({title:"編輯場次備註",label:"備註",defaultValue:evt.note||"",onSave:v=>{updateEvent(evt.id,e=>{e.note=v||undefined;return e;});setInputModal(null);}})} style={{ background:"none",border:"none",fontSize:11,color:"#8b7355",cursor:"pointer",fontWeight:600,fontFamily:"inherit" }}>編輯</button></div>}
                 <div style={{ display:"flex",gap:8,marginTop:10,flexWrap:"wrap" }}>
                   {evt.status==="active"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 全部已取票</button>}
+                  {(evt.buyers||[]).some(b=>(b.identities||[]).length>0)&&<button onClick={()=>setIdentityExportModal({events:[evt],title:evt.name})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出本場實名</button>}
                   {(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"))&&<button onClick={()=>{
                     addLog(`【${evt.name}】全部待退費標記為已退款`,snap());
                     updateEvent(evt.id,e=>{
@@ -1446,6 +1583,7 @@ export default function App() {
 
       {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={()=>setConfirmModal(null)}/>}
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
+      {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
     </div>
   );
 }
