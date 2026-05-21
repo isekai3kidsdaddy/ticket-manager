@@ -1051,7 +1051,7 @@ export default function App() {
     <div style={{ fontFamily: "'Zen Kaku Gothic New','Noto Sans TC',system-ui,sans-serif", background: "#f2f0eb", minHeight: "100vh", color: "#2d2a26" }}>
       <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet" />
       <style>{`
-        html,body{zoom:1.3}
+        @media (min-width: 768px) { html,body{zoom:1.3} }
         *{box-sizing:border-box} @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}} .anim-in{animation:fadeIn .2s ease-out}
         input:focus,select:focus{border-color:#8b7355!important;outline:none}
         .qty-btn{width:28px;height:28px;border-radius:7px;border:1.5px solid #d4d0c8;background:#fff;font-size:16px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;color:#2d2a26;font-family:inherit}
