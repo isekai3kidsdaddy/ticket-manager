@@ -380,6 +380,7 @@ function IdentityExportModal({ events, title, onClose }) {
         if (r.buyerName !== lastBuyer) { lines.push(`【${r.buyerName}】`); lastBuyer = r.buyerName; }
         const parts = [];
         parts.push(`姓名:${r.name||"(未填)"}`);
+        parts.push(`拿 ${r.qty||1} 張`);
         if (r.phone) parts.push(`電話:${r.phone}`);
         if (r.idNumber) parts.push(`身分證:${r.idNumber}`);
         if (r.tixAccount) parts.push(`拓元:${r.tixAccount}`);
@@ -395,11 +396,11 @@ function IdentityExportModal({ events, title, onClose }) {
   })();
 
   // Excel/Sheet 格式（tab 分隔）
-  const headers = ["場次","訂購人","姓名","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  const headers = ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
   const sheetOutput = (() => {
     const lines = [headers.join("\t")];
     rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].join("\t"));
+      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].join("\t"));
     });
     return lines.join("\n");
   })();
@@ -409,7 +410,7 @@ function IdentityExportModal({ events, title, onClose }) {
     const escape = v => `"${String(v||"").replace(/"/g,'""')}"`;
     const lines = [headers.map(escape).join(",")];
     rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].map(escape).join(","));
+      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].map(escape).join(","));
     });
     return lines.join("\n");
   })();
@@ -689,7 +690,7 @@ export default function App() {
     addLog(`【${evt.name}】${b.name}:新增一筆實名資料`, snap());
     updateEvent(eventId, e => {
       const list = Array.isArray(e.buyers[idx].identities) ? [...e.buyers[idx].identities] : [];
-      list.push({ id: Date.now()+Math.random(), name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"" });
+      list.push({ id: Date.now()+Math.random(), name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
       e.buyers[idx] = { ...e.buyers[idx], identities: list, needRealName: true };
       return e;
     });
@@ -1279,20 +1280,22 @@ export default function App() {
                       {/* 實名資料清單（多筆）*/}
                       {(b.needRealName || (b.identities && b.identities.length > 0)) && (() => {
                         const idCount = (b.identities || []).length;
-                        const diff = idCount - totalQ;
+                        const idCount = (b.identities || []).length;
+                        const idQty = (b.identities || []).reduce((s,x)=>s+(x.qty||1),0);
+                        const diff = idQty - totalQ;
                         const matches = diff === 0;
                         const short = diff < 0;
                         return (
                         <div style={{ marginTop:8,padding:"8px 10px",background:"rgba(255,255,255,.55)",borderRadius:8,border:"1px dashed #d4cdb8" }}>
                           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 實名資料 ({idCount} / {totalQ})</span>
+                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 實名資料 {idCount} 筆 ({idQty} / {totalQ} 張)</span>
                               {idCount > 0 && (
                                 matches
-                                  ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 筆數相符</span>
+                                  ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數相符</span>
                                   : short
-                                    ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#fce8e8",color:"#8b3a3a" }}>⚠ 還少 {-diff} 筆</span>
-                                    : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {diff} 筆</span>
+                                    ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#fce8e8",color:"#8b3a3a" }}>⚠ 還少 {-diff} 張</span>
+                                    : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {diff} 張</span>
                               )}
                             </div>
                             <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增一筆</button>
@@ -1303,11 +1306,17 @@ export default function App() {
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
                             const isOpen = expandedIdentity === ekey;
+                            const itQty = it.qty || 1;
                             return (
                               <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
                                 <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                                   <button onClick={()=>setExpandedIdentity(isOpen?null:ekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
                                   <span style={{ fontSize:12,fontWeight:700,color:it.name?"#2d2a26":"#bbb" }}>{it.name || "(未填姓名)"}</span>
+                                  <div style={{ display:"flex",alignItems:"center",gap:2 }}>
+                                    <button onClick={(e)=>{e.stopPropagation();if(itQty>1)updateIdentity(evt.id,i,it.id,{qty:itQty-1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>−</button>
+                                    <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
+                                    <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
+                                  </div>
                                   {it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
                                   {it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
                                   <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
