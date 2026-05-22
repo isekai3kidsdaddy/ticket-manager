@@ -317,14 +317,14 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // Custom modals (confirm/prompt don't work in this env)
-function ConfirmModal({ msg, onYes, onNo }) {
+function ConfirmModal({ msg, onYes, onNo, yesLabel, noLabel, maxWidth }) {
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onNo}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"24px",width:"100%",maxWidth:360,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"24px",width:"100%",maxWidth:maxWidth||360,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
         <div style={{ fontSize:15, marginBottom:20, lineHeight:1.6, whiteSpace:"pre-line" }}>{msg}</div>
-        <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
-          <button onClick={onNo} style={{ padding:"8px 20px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:14,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>取消</button>
-          <button onClick={onYes} style={{ padding:"8px 20px",borderRadius:8,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>確定</button>
+        <div style={{ display:"flex", gap:8, justifyContent:"flex-end",flexWrap:"wrap" }}>
+          <button onClick={onNo} style={{ padding:"8px 20px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:14,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>{noLabel||"取消"}</button>
+          <button onClick={onYes} style={{ padding:"8px 20px",borderRadius:8,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>{yesLabel||"確定"}</button>
         </div>
       </div>
     </div>
@@ -513,9 +513,19 @@ export default function App() {
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
   const [syncStatus, setSyncStatus] = useState(SUPABASE_READY ? "loading" : "offline");
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
-  const lastSyncedAtRef = useRef(null); // 給 async callback 用，避免閉包過期
+  const lastSyncedAtRef = useRef(null);
   const initialLoadDone = useRef(false);
   const saveTimer = useRef(null);
+  // 「上次成功同步的內容指紋」——下次想上傳前比對，如果指紋一樣表示「內容沒變」就不上傳
+  const lastSavedSignature = useRef(null);
+  // 「使用者是否最近有互動」——閒置 5 分鐘以上的視窗不會主動上傳
+  const lastInteractionRef = useRef(Date.now());
+  const IDLE_MS = 5 * 60 * 1000; // 5 分鐘
+
+  // 把 events/buyerNames/logs 變成一個字串指紋(用 JSON.stringify 簡單夠用)
+  const makeSignature = (events, buyerNames, logs) => {
+    try { return JSON.stringify({ e: events, n: buyerNames, l: (logs||[]).slice(0,20) }); } catch { return ""; }
+  };
 
   // 1) On mount: load from Supabase
   useEffect(() => {
@@ -532,6 +542,8 @@ export default function App() {
           if (Array.isArray(p.logs)) setLogs(p.logs);
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
+          // 載入後記下指紋，這樣後續同步前可以比對
+          lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
         }
         setSyncStatus("saved");
       } catch (e) {
@@ -544,6 +556,19 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // 追蹤使用者互動——點擊、按鍵、滑動都算
+  useEffect(() => {
+    const onInteract = () => { lastInteractionRef.current = Date.now(); };
+    window.addEventListener("click", onInteract);
+    window.addEventListener("keydown", onInteract);
+    window.addEventListener("touchstart", onInteract);
+    return () => {
+      window.removeEventListener("click", onInteract);
+      window.removeEventListener("keydown", onInteract);
+      window.removeEventListener("touchstart", onInteract);
+    };
+  }, []);
+
   // 2) On change: save to localStorage immediately + debounced safe-save to Supabase
   useEffect(() => {
     try {
@@ -553,6 +578,15 @@ export default function App() {
     } catch {}
 
     if (!SUPABASE_READY || !initialLoadDone.current) return;
+
+    // 防護 1:檢查內容是否真的變了。如果指紋跟上次一樣表示是 React 重新渲染、不是真的改動。
+    const currentSig = makeSignature(events, buyerNames, logs);
+    if (currentSig === lastSavedSignature.current) return; // 內容沒變不上傳
+
+    // 防護 2:檢查使用者是否最近有互動。閒置太久的視窗不主動上傳。
+    const idle = Date.now() - lastInteractionRef.current > IDLE_MS;
+    if (idle) return; // 閒置中,不上傳
+
     setSyncStatus("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
@@ -561,16 +595,47 @@ export default function App() {
         setSyncStatus("saved");
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
+        lastSavedSignature.current = currentSig;
       } else if (res.reason === "stale" && res.remote && res.remote.payload) {
-        // 雲端有更新的版本(其他裝置改的)，不要覆蓋。改成拉新版下來
-        const p = res.remote.payload;
-        if (Array.isArray(p.events)) setEvents(p.events);
-        if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
-        if (Array.isArray(p.logs)) setLogs(p.logs);
-        setLastSyncedAt(res.remote.updatedAt);
-        lastSyncedAtRef.current = res.remote.updatedAt;
+        // 衝突:雲端有更新的版本。讓使用者選擇要保留自己的還是採用雲端的
+        const remotePayload = res.remote.payload;
+        const remoteTs = res.remote.updatedAt;
+        const myEvents = events, myBuyerNames = buyerNames, myLogs = logs;
         setSyncStatus("saved");
-        setConfirmModal({ msg: "偵測到其他裝置剛剛改了資料,已自動拉最新版下來,避免覆蓋。\n\n你剛才如果在編輯,請重新確認你的修改是否還在。", onYes: () => setConfirmModal(null) });
+        const remoteTime = new Date(remoteTs).toLocaleString("zh-TW", { hour12: false });
+        setConfirmModal({
+          msg: `偵測到其他裝置在 ${remoteTime} 改了資料。\n\n要保留你剛剛的修改,還是採用雲端的版本?\n\n👉「保留我的」=會把雲端覆蓋掉(對方修改會消失)\n👉「採用雲端」=放棄你剛改的內容\n\n建議先點「💾 匯出備份」存一份再決定。`,
+          yesLabel: "✓ 保留我的",
+          noLabel: "↓ 採用雲端",
+          maxWidth: 460,
+          onYes: () => {
+            // 保留本機 -> 強制覆蓋雲端
+            setConfirmModal(null);
+            (async () => {
+              setSyncStatus("saving");
+              const force = await saveToSupabase({ events: myEvents, buyerNames: myBuyerNames, logs: myLogs }, null);
+              if (force.ok) {
+                setSyncStatus("saved");
+                setLastSyncedAt(force.updatedAt);
+                lastSyncedAtRef.current = force.updatedAt;
+                lastSavedSignature.current = makeSignature(myEvents, myBuyerNames, myLogs);
+              } else {
+                setSyncStatus("error");
+              }
+            })();
+          },
+          onNo: () => {
+            // 採用雲端
+            const p = remotePayload;
+            if (Array.isArray(p.events)) setEvents(p.events);
+            if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
+            if (Array.isArray(p.logs)) setLogs(p.logs);
+            setLastSyncedAt(remoteTs);
+            lastSyncedAtRef.current = remoteTs;
+            lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
+            setConfirmModal(null);
+          }
+        });
       } else {
         setSyncStatus("error");
       }
@@ -590,6 +655,7 @@ export default function App() {
         if (Array.isArray(p.logs)) setLogs(p.logs);
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
+        lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
       }
       setSyncStatus("saved");
     } catch {
@@ -597,7 +663,8 @@ export default function App() {
     }
   };
 
-  // 4) 頁面回到前景時自動重新拉雲端,防止用過期的本機版本覆蓋
+  // 4) 頁面回到前景時:只「拉雲端最新版」,不會主動上傳。
+  // 防止「對方視窗開著沒動」的情境誤觸上傳。
   useEffect(() => {
     if (!SUPABASE_READY) return;
     const onVisible = () => {
@@ -1749,7 +1816,7 @@ export default function App() {
         </div>
       </div>)}
 
-      {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={()=>setConfirmModal(null)}/>}
+      {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={confirmModal.onNo||(()=>setConfirmModal(null))} yesLabel={confirmModal.yesLabel} noLabel={confirmModal.noLabel} maxWidth={confirmModal.maxWidth}/>}
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
     </div>
