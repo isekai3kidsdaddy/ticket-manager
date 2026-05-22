@@ -512,10 +512,11 @@ export default function App() {
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
   const [syncStatus, setSyncStatus] = useState(SUPABASE_READY ? "loading" : "offline");
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const lastSyncedAtRef = useRef(null); // 給 async callback 用，避免閉包過期
   const initialLoadDone = useRef(false);
   const saveTimer = useRef(null);
 
-  // 1) On mount: try to load from Supabase, if newer than local then replace local
+  // 1) On mount: load from Supabase
   useEffect(() => {
     if (!SUPABASE_READY) { initialLoadDone.current = true; return; }
     let cancelled = false;
@@ -529,6 +530,7 @@ export default function App() {
           if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
           if (Array.isArray(p.logs)) setLogs(p.logs);
           setLastSyncedAt(res.updatedAt);
+          lastSyncedAtRef.current = res.updatedAt;
         }
         setSyncStatus("saved");
       } catch (e) {
@@ -541,7 +543,7 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // 2) On change: save to localStorage immediately + debounced save to Supabase
+  // 2) On change: save to localStorage immediately + debounced safe-save to Supabase
   useEffect(() => {
     try {
       window.localStorage?.setItem?.("tkm-v3", JSON.stringify(events));
@@ -549,18 +551,32 @@ export default function App() {
       window.localStorage?.setItem?.("tkm-v3-logs", JSON.stringify(logs));
     } catch {}
 
-    // Skip the very first effect run (which fires before initial Supabase load completes)
     if (!SUPABASE_READY || !initialLoadDone.current) return;
     setSyncStatus("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const res = await saveToSupabase({ events, buyerNames, logs });
-      if (res.ok) { setSyncStatus("saved"); setLastSyncedAt(new Date().toISOString()); }
-      else { setSyncStatus("error"); }
-    }, 800); // wait 0.8s after last change to batch saves
+      const res = await saveToSupabase({ events, buyerNames, logs }, lastSyncedAtRef.current);
+      if (res.ok) {
+        setSyncStatus("saved");
+        setLastSyncedAt(res.updatedAt);
+        lastSyncedAtRef.current = res.updatedAt;
+      } else if (res.reason === "stale" && res.remote && res.remote.payload) {
+        // 雲端有更新的版本(其他裝置改的)，不要覆蓋。改成拉新版下來
+        const p = res.remote.payload;
+        if (Array.isArray(p.events)) setEvents(p.events);
+        if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
+        if (Array.isArray(p.logs)) setLogs(p.logs);
+        setLastSyncedAt(res.remote.updatedAt);
+        lastSyncedAtRef.current = res.remote.updatedAt;
+        setSyncStatus("saved");
+        setConfirmModal({ msg: "偵測到其他裝置剛剛改了資料,已自動拉最新版下來,避免覆蓋。\n\n你剛才如果在編輯,請重新確認你的修改是否還在。", onYes: () => setConfirmModal(null) });
+      } else {
+        setSyncStatus("error");
+      }
+    }, 800);
   }, [events, buyerNames, logs]);
 
-  // 3) Manual refetch (用於手機更新後想立刻拉電腦的最新資料)
+  // 3) Manual refetch
   const refetchFromCloud = async () => {
     if (!SUPABASE_READY) return;
     setSyncStatus("loading");
@@ -572,12 +588,29 @@ export default function App() {
         if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
         if (Array.isArray(p.logs)) setLogs(p.logs);
         setLastSyncedAt(res.updatedAt);
+        lastSyncedAtRef.current = res.updatedAt;
       }
       setSyncStatus("saved");
     } catch {
       setSyncStatus("error");
     }
   };
+
+  // 4) 頁面回到前景時自動重新拉雲端,防止用過期的本機版本覆蓋
+  useEffect(() => {
+    if (!SUPABASE_READY) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && initialLoadDone.current) {
+        refetchFromCloud();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, []);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
