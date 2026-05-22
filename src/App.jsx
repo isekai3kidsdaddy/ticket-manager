@@ -527,6 +527,83 @@ export default function App() {
     try { return JSON.stringify({ e: events, n: buyerNames, l: (logs||[]).slice(0,20) }); } catch { return ""; }
   };
 
+  // 上次成功同步時的「基準快照」,用於 3-way merge
+  const baseSnapshotRef = useRef(null);
+
+  // 比較兩個 event 是否實質相同(用 JSON.stringify)
+  const eventEqual = (a, b) => {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+  };
+
+  // 3-way merge:合併本地、雲端、基準三方版本
+  // 回傳 { merged, conflicts: [{id, name, my, remote}] }
+  const mergeEvents = (myEvents, baseEvents, remoteEvents) => {
+    const baseById = new Map((baseEvents||[]).map(e => [e.id, e]));
+    const myById = new Map((myEvents||[]).map(e => [e.id, e]));
+    const remoteById = new Map((remoteEvents||[]).map(e => [e.id, e]));
+    const allIds = new Set([...myById.keys(), ...remoteById.keys(), ...baseById.keys()]);
+    const merged = [];
+    const conflicts = [];
+
+    for (const id of allIds) {
+      const my = myById.get(id);
+      const base = baseById.get(id);
+      const remote = remoteById.get(id);
+
+      // 雙方都刪除 / 都沒有
+      if (!my && !remote) continue;
+
+      // 只有一方有
+      if (my && !remote) {
+        // 我有,對方沒有 -> 可能是我新增 (base 沒有 & my 有) 或對方刪除 (base 有 & my 沒改)
+        if (!base) { merged.push(my); continue; } // 我新增
+        if (eventEqual(my, base)) continue; // 對方刪除,我沒改 -> 接受刪除
+        // 我改了,對方刪了 -> 衝突,保留我的
+        conflicts.push({ id, name: my.name, my, remote: null });
+        merged.push(my);
+        continue;
+      }
+      if (!my && remote) {
+        if (!base) { merged.push(remote); continue; } // 對方新增
+        if (eventEqual(remote, base)) continue; // 我刪除,對方沒改 -> 接受刪除
+        // 我刪了,對方改了 -> 衝突,保留對方的
+        conflicts.push({ id, name: remote.name, my: null, remote });
+        merged.push(remote);
+        continue;
+      }
+
+      // 雙方都有
+      const myChanged = !eventEqual(my, base);
+      const remoteChanged = !eventEqual(remote, base);
+
+      if (!myChanged && !remoteChanged) { merged.push(my); continue; } // 都沒改
+      if (myChanged && !remoteChanged) { merged.push(my); continue; } // 只有我改
+      if (!myChanged && remoteChanged) { merged.push(remote); continue; } // 只有對方改
+      if (eventEqual(my, remote)) { merged.push(my); continue; } // 雙方改成一樣
+      // 真衝突
+      conflicts.push({ id, name: my.name, my, remote });
+      merged.push(my); // 預設先用我的
+    }
+    return { merged, conflicts };
+  };
+
+  // 合併 logs:聯集 + 按時間排序 + 去重 + 截前 500
+  const mergeLogs = (myLogs, remoteLogs) => {
+    const seen = new Set();
+    const all = [];
+    for (const l of (myLogs||[])) { const k = `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
+    for (const l of (remoteLogs||[])) { const k = `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
+    all.sort((a, b) => b.time - a.time);
+    return all.slice(0, 500);
+  };
+
+  // 合併 buyerNames:聯集去重
+  const mergeBuyerNames = (myNames, remoteNames) => {
+    return Array.from(new Set([...(myNames||[]), ...(remoteNames||[])]));
+  };
+
   // 1) On mount: load from Supabase
   useEffect(() => {
     if (!SUPABASE_READY) { initialLoadDone.current = true; return; }
@@ -542,8 +619,9 @@ export default function App() {
           if (Array.isArray(p.logs)) setLogs(p.logs);
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
-          // 載入後記下指紋，這樣後續同步前可以比對
           lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
+          // 記下「上次同步時雲端的版本」,當合併基準
+          baseSnapshotRef.current = { events: p.events||[], buyerNames: p.buyerNames||[], logs: p.logs||[] };
         }
         setSyncStatus("saved");
       } catch (e) {
@@ -596,46 +674,88 @@ export default function App() {
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
         lastSavedSignature.current = currentSig;
+        // 更新合併基準為「我剛上傳的版本」
+        baseSnapshotRef.current = { events, buyerNames, logs };
       } else if (res.reason === "stale" && res.remote && res.remote.payload) {
-        // 衝突:雲端有更新的版本。讓使用者選擇要保留自己的還是採用雲端的
-        const remotePayload = res.remote.payload;
+        // 衝突:雲端有更新的版本。嘗試 3-way merge
+        const remoteP = res.remote.payload;
         const remoteTs = res.remote.updatedAt;
-        const myEvents = events, myBuyerNames = buyerNames, myLogs = logs;
-        setSyncStatus("saved");
-        const remoteTime = new Date(remoteTs).toLocaleString("zh-TW", { hour12: false });
-        setConfirmModal({
-          msg: `偵測到其他裝置在 ${remoteTime} 改了資料。\n\n要保留你剛剛的修改,還是採用雲端的版本?\n\n👉「保留我的」=會把雲端覆蓋掉(對方修改會消失)\n👉「採用雲端」=放棄你剛改的內容\n\n建議先點「💾 匯出備份」存一份再決定。`,
-          yesLabel: "✓ 保留我的",
-          noLabel: "↓ 採用雲端",
-          maxWidth: 460,
-          onYes: () => {
-            // 保留本機 -> 強制覆蓋雲端
-            setConfirmModal(null);
-            (async () => {
-              setSyncStatus("saving");
-              const force = await saveToSupabase({ events: myEvents, buyerNames: myBuyerNames, logs: myLogs }, null);
-              if (force.ok) {
-                setSyncStatus("saved");
-                setLastSyncedAt(force.updatedAt);
-                lastSyncedAtRef.current = force.updatedAt;
-                lastSavedSignature.current = makeSignature(myEvents, myBuyerNames, myLogs);
-              } else {
-                setSyncStatus("error");
-              }
-            })();
-          },
-          onNo: () => {
-            // 採用雲端
-            const p = remotePayload;
-            if (Array.isArray(p.events)) setEvents(p.events);
-            if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
-            if (Array.isArray(p.logs)) setLogs(p.logs);
-            setLastSyncedAt(remoteTs);
-            lastSyncedAtRef.current = remoteTs;
-            lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
-            setConfirmModal(null);
+        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+
+        const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
+        const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
+        const mergedLogs = mergeLogs(logs, remoteP.logs || []);
+
+        if (mergeResult.conflicts.length === 0) {
+          // 沒有真衝突 -> 自動合併並上傳
+          const mergedEvents = mergeResult.merged;
+          setEvents(mergedEvents);
+          setBuyerNames(mergedNames);
+          setLogs(mergedLogs);
+          setSyncStatus("saving");
+          // 上傳合併後版本(用 remoteTs 當基準,確保不會再撞)
+          const force = await saveToSupabase({ events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs }, remoteTs);
+          if (force.ok) {
+            setSyncStatus("saved");
+            setLastSyncedAt(force.updatedAt);
+            lastSyncedAtRef.current = force.updatedAt;
+            lastSavedSignature.current = makeSignature(mergedEvents, mergedNames, mergedLogs);
+            baseSnapshotRef.current = { events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs };
+          } else {
+            // 第二次又撞?稍後重試(下次資料變動時會自動再來)
+            setSyncStatus("error");
           }
-        });
+        } else {
+          // 有真衝突:同一個場次雙方都改了。列出衝突場次給使用者看
+          const remoteTime = new Date(remoteTs).toLocaleString("zh-TW", { hour12: false });
+          const conflictNames = mergeResult.conflicts.map(c => c.name).join("、");
+          const safeMergedEvents = mergeResult.merged; // 已套上「我的優先」
+          const otherChoiceEvents = mergeResult.merged.map(e => {
+            const c = mergeResult.conflicts.find(x => x.id === e.id);
+            return c && c.remote ? c.remote : e;
+          });
+          setSyncStatus("saved");
+          setConfirmModal({
+            msg: `偵測到衝突!\n\n以下場次你和其他裝置都改過:\n📌 ${conflictNames}\n\n其他人是在 ${remoteTime} 改的。\n\n👉「保留我的」=用我的版本(其他場次自動合併不影響)\n👉「採用對方」=用對方的版本(只針對衝突場次)\n\n建議先「💾 匯出備份」再決定。`,
+            yesLabel: "✓ 保留我的",
+            noLabel: "↓ 採用對方",
+            maxWidth: 460,
+            onYes: () => {
+              setConfirmModal(null);
+              (async () => {
+                setSyncStatus("saving");
+                setEvents(safeMergedEvents);
+                setBuyerNames(mergedNames);
+                setLogs(mergedLogs);
+                const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs }, null);
+                if (force.ok) {
+                  setSyncStatus("saved");
+                  setLastSyncedAt(force.updatedAt);
+                  lastSyncedAtRef.current = force.updatedAt;
+                  lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, mergedLogs);
+                  baseSnapshotRef.current = { events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs };
+                } else { setSyncStatus("error"); }
+              })();
+            },
+            onNo: () => {
+              setConfirmModal(null);
+              (async () => {
+                setSyncStatus("saving");
+                setEvents(otherChoiceEvents);
+                setBuyerNames(mergedNames);
+                setLogs(mergedLogs);
+                const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs }, null);
+                if (force.ok) {
+                  setSyncStatus("saved");
+                  setLastSyncedAt(force.updatedAt);
+                  lastSyncedAtRef.current = force.updatedAt;
+                  lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, mergedLogs);
+                  baseSnapshotRef.current = { events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs };
+                } else { setSyncStatus("error"); }
+              })();
+            }
+          });
+        }
       } else {
         setSyncStatus("error");
       }
@@ -656,6 +776,7 @@ export default function App() {
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
         lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
+        baseSnapshotRef.current = { events: p.events||[], buyerNames: p.buyerNames||[], logs: p.logs||[] };
       }
       setSyncStatus("saved");
     } catch {
@@ -679,6 +800,45 @@ export default function App() {
       window.removeEventListener("focus", onVisible);
     };
   }, []);
+
+  // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
+  // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
+  useEffect(() => {
+    if (!SUPABASE_READY) return;
+    const POLL_MS = 30 * 1000;
+    const timer = setInterval(async () => {
+      if (!initialLoadDone.current) return;
+      if (document.visibilityState !== "visible") return; // 背景中不 poll
+      if (saveTimer.current) return; // 正在準備上傳,跳過這次
+
+      try {
+        const res = await loadFromSupabase();
+        if (!res || !res.payload) return;
+        // 雲端沒變化就跳過
+        if (res.updatedAt === lastSyncedAtRef.current) return;
+
+        const remoteP = res.payload;
+        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+        // 自動合併:把雲端新內容跟本地未上傳的修改合併
+        const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
+        const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
+        const mergedLogs = mergeLogs(logs, remoteP.logs || []);
+
+        if (mergeResult.conflicts.length === 0) {
+          // 無衝突:靜默合併
+          setEvents(mergeResult.merged);
+          setBuyerNames(mergedNames);
+          setLogs(mergedLogs);
+          setLastSyncedAt(res.updatedAt);
+          lastSyncedAtRef.current = res.updatedAt;
+          lastSavedSignature.current = makeSignature(mergeResult.merged, mergedNames, mergedLogs);
+          baseSnapshotRef.current = { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
+        }
+        // 有衝突:讓主要的 save useEffect 在下次資料變動時處理(避免重複彈窗)
+      } catch (e) { /* silent */ }
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [events, buyerNames, logs]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
