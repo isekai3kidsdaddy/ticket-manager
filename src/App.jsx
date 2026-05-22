@@ -504,9 +504,10 @@ export default function App() {
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
+  const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
 
-  const addLog = (msg, snapshot) => setLogs(prev => [{ id: Date.now(), time: Date.now(), msg, snapshot }, ...prev].slice(0, 100));
+  const addLog = (msg, snapshot) => setLogs(prev => [{ id: Date.now(), time: Date.now(), msg, snapshot }, ...prev].slice(0, 500));
   const snap = () => JSON.parse(JSON.stringify(events));
 
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
@@ -645,27 +646,44 @@ export default function App() {
 
   // Timeline data: group by date → by buyer (for 時間軸 tab)
   const timelineData = useMemo(() => {
-    const entries = [];
-    events.forEach(evt => {
-      (evt.buyers || []).forEach(b => {
-        if (b.addedAt) entries.push({ time: b.addedAt, eventName: evt.name, eventId: evt.id, eventStatus: evt.status, buyerName: b.name, qty: buyerTotalQty(b), st: buyerPrimaryStatus(b) });
-      });
-    });
-    entries.sort((a, b) => b.time - a.time);
+    // 從 logs 撈所有異動，解析動作類型 + 對應的場次（讓「前往」按鈕能用）
+    const parseLog = (log) => {
+      const msg = log.msg || "";
+      // 比對【場次名】開頭
+      const m = msg.match(/^【(.+?)】(.*)$/);
+      let eventName = null, rest = msg;
+      if (m) { eventName = m[1]; rest = m[2]; }
+      // 找對應 evt（用名稱比對，因為事後場次可能改名，但這是盡力而為）
+      const evt = eventName ? events.find(e => e.name === eventName) : null;
+
+      // 動作類型判斷（影響圖示和顏色）
+      let kind = "other", icon = "•", color = "#999";
+      if (/^新增「/.test(rest))             { kind = "add";    icon = "➕"; color = "#3a7a3a"; }
+      else if (/^移除「/.test(rest))        { kind = "remove"; icon = "✖";  color = "#c47070"; }
+      else if (/張數/.test(rest))           { kind = "qty";    icon = "🔢"; color = "#4a7aab"; }
+      else if (/狀態/.test(rest) || /待退費|已退款|已取票|未付款/.test(rest)) { kind = "status"; icon = "🏷"; color = "#a87830"; }
+      else if (/實名|SID|給票|回傳照|帳號鎖/.test(rest)) { kind = "flag"; icon = "📝"; color = "#7a5a8b"; }
+      else if (/票價/.test(rest))           { kind = "price";  icon = "💰"; color = "#3a8a7a"; }
+      else if (/分批/.test(rest))           { kind = "batch";  icon = "📦"; color = "#5a7aab"; }
+      else if (/改名/.test(msg))            { kind = "rename"; icon = "✎";  color = "#888"; }
+      else if (/匯入備份/.test(msg))        { kind = "import"; icon = "📥"; color = "#aa7030"; }
+      else if (/還原/.test(msg))            { kind = "revert"; icon = "⟲";  color = "#aa7030"; }
+
+      return { ...log, eventName, eventId: evt?.id, eventStatus: evt?.status, restMsg: rest, kind, icon, color };
+    };
+
+    const entries = (logs || []).map(parseLog);
+
+    // 按日期分組
     const byDate = new Map();
     entries.forEach(e => {
       const d = new Date(e.time);
       const dateKey = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
-      if (!byDate.has(dateKey)) byDate.set(dateKey, new Map());
-      const buyerMap = byDate.get(dateKey);
-      if (!buyerMap.has(e.buyerName)) buyerMap.set(e.buyerName, []);
-      buyerMap.get(e.buyerName).push(e);
+      if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+      byDate.get(dateKey).push(e);
     });
-    return Array.from(byDate.entries()).map(([date, buyerMap]) => ({
-      date,
-      buyers: Array.from(buyerMap.entries()).map(([name, items]) => ({ name, items }))
-    }));
-  }, [events]);
+    return Array.from(byDate.entries()).map(([date, items]) => ({ date, items }));
+  }, [logs, events]);
 
   // Jump from buyers/timeline view to the event card in the appropriate tab
   const jumpToEvent = (eventId, eventStatus) => {
@@ -820,7 +838,14 @@ export default function App() {
   };
 
   const undoTo = (log) => {
-    setConfirmModal({ msg: `確定要還原到「${log.msg}」之前的狀態嗎？`, onYes: () => { addLog("⟲ 還原操作", snap()); setEvents(log.snapshot); setConfirmModal(null); } });
+    // 計算這個還原點之後（時間更新）的異動數
+    const newerCount = (logs || []).filter(l => l.time > log.time).length;
+    const d = new Date(log.time);
+    const ts = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+    setConfirmModal({
+      msg: `即將還原到 ${ts}「${log.msg}」之前的版本。\n\n⚠ 之後的 ${newerCount} 筆異動會消失!\n\n👉 強烈建議先點「💾 匯出備份」存一份再還原,以防萬一。\n\n要繼續嗎?`,
+      onYes: () => { addLog(`⟲ 還原到 ${ts}`, snap()); setEvents(log.snapshot); setConfirmModal(null); }
+    });
   };
 
   const exportCSV = () => {
@@ -1159,24 +1184,98 @@ export default function App() {
           </div>)}
 
         {/* Log Panel */}
-        {showLog&&(
-          <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden" }}>
-            <div style={{ padding:"14px 18px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
-              <span style={{ fontWeight:700,fontSize:15 }}>📋 操作紀錄</span>
-              {logs.length>0&&<button onClick={()=>setConfirmModal({msg:"確定要清除所有操作紀錄嗎？",onYes:()=>{setLogs([]);setConfirmModal(null);}})} style={{ padding:"5px 12px",borderRadius:7,border:"1px solid #e8c4c4",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>清除紀錄</button>}
+        {showLog&&(()=>{
+          // 找適合的「快捷還原點」
+          const now = Date.now();
+          const findClosestLog = (targetTime) => {
+            // 找時間最接近 targetTime（且 <= targetTime）的有 snapshot 的 log
+            const candidates = (logs || []).filter(l => l.snapshot && l.time <= targetTime);
+            return candidates.length > 0 ? candidates[0] : null;
+          };
+          const today0 = new Date(); today0.setHours(0,0,0,0);
+          const yest23 = new Date(); yest23.setDate(yest23.getDate()-1); yest23.setHours(23,59,59,999);
+          const week = now - 7*24*60*60*1000;
+          const hour = now - 60*60*1000;
+
+          const shortcuts = [
+            { label:"⟲ 一小時前", target:hour },
+            { label:"⟲ 今天早上", target:today0.getTime() },
+            { label:"⟲ 昨天結尾", target:yest23.getTime() },
+            { label:"⟲ 一週前", target:week },
+          ].map(s => ({ ...s, log: findClosestLog(s.target) })).filter(s => s.log);
+
+          // 按日期分組
+          const byDate = new Map();
+          (logs || []).forEach(log => {
+            const d = new Date(log.time);
+            const dk = `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+            if (!byDate.has(dk)) byDate.set(dk, []);
+            byDate.get(dk).push(log);
+          });
+
+          const oldestLog = logs.length > 0 ? logs[logs.length-1] : null;
+          const oldestDate = oldestLog ? new Date(oldestLog.time) : null;
+
+          return (
+          <div style={{ display:"flex",flexDirection:"column",gap:12 }}>
+            {/* 說明卡 */}
+            <div style={{ background:"#fff3e0",borderRadius:12,border:"1px solid #e6b87a",padding:"12px 16px",fontSize:12,color:"#7a5a30",lineHeight:1.6 }}>
+              <div style={{ fontWeight:700,marginBottom:4,fontSize:13,color:"#5a4020" }}>📋 還原中心</div>
+              這裡可以把資料倒帶到過去某個時間點，**用於誤改、誤刪救急**。每次還原前都建議先 💾 匯出備份。
             </div>
-            {logs.length===0?<div style={{ padding:30,textAlign:"center",color:"#bbb",fontSize:14 }}>目前沒有操作紀錄</div>:(
-              <div style={{ maxHeight:500,overflowY:"auto" }}>
-                {logs.map(log=>{
-                  const d=new Date(log.time);
-                  const ts=`${(d.getMonth()+1).toString().padStart(2,"0")}/${d.getDate().toString().padStart(2,"0")} ${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}:${d.getSeconds().toString().padStart(2,"0")}`;
-                  return (<div key={log.id} style={{ padding:"10px 18px",borderBottom:"1px solid #f5f3ef",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,fontSize:13 }}>
-                    <div style={{ flex:1,minWidth:0 }}><span style={{ color:"#999",fontSize:12,marginRight:8,fontFamily:"monospace" }}>{ts}</span><span>{log.msg}</span></div>
-                    {log.snapshot&&<button onClick={()=>undoTo(log)} style={{ padding:"4px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit",whiteSpace:"nowrap" }}>⟲ 還原</button>}
-                  </div>);
-                })}
-              </div>)}
-          </div>)}
+
+            {/* 統計 */}
+            {logs.length > 0 && (
+              <div style={{ background:"#fff",borderRadius:12,border:"1px solid #e4e0d8",padding:"12px 16px",display:"flex",gap:24,flexWrap:"wrap",fontSize:13 }}>
+                <div><span style={{ color:"#999" }}>總紀錄：</span><span style={{ fontWeight:700 }}>{logs.length} 筆</span><span style={{ color:"#bbb",fontSize:11,marginLeft:4 }}>(上限 500)</span></div>
+                {oldestDate && <div><span style={{ color:"#999" }}>最早可還原到：</span><span style={{ fontWeight:700 }}>{oldestDate.getFullYear()}/{String(oldestDate.getMonth()+1).padStart(2,"0")}/{String(oldestDate.getDate()).padStart(2,"0")}</span></div>}
+              </div>
+            )}
+
+            {/* 快捷還原 */}
+            {shortcuts.length > 0 && (
+              <div style={{ background:"#fff",borderRadius:12,border:"1px solid #e4e0d8",padding:"14px 16px" }}>
+                <div style={{ fontSize:12,fontWeight:700,color:"#7a6850",marginBottom:8 }}>⚡ 快捷還原</div>
+                <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                  {shortcuts.map((s,i)=>(
+                    <button key={i} onClick={()=>undoTo(s.log)} style={{ padding:"7px 14px",borderRadius:8,border:"1.5px solid #d4cdb8",background:"#faf7f0",cursor:"pointer",fontSize:12,fontWeight:700,color:"#7a5a30",fontFamily:"inherit" }}>{s.label}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 完整紀錄按日期分組 */}
+            <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden" }}>
+              <div style={{ padding:"12px 18px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+                <span style={{ fontWeight:700,fontSize:14 }}>📚 完整歷史</span>
+                {logs.length>0&&<button onClick={()=>setConfirmModal({msg:"確定要清除所有歷史紀錄嗎?\n清除後就不能再還原。",onYes:()=>{setLogs([]);setConfirmModal(null);}})} style={{ padding:"5px 12px",borderRadius:7,border:"1px solid #e8c4c4",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>清除紀錄</button>}
+              </div>
+              {logs.length===0?<div style={{ padding:30,textAlign:"center",color:"#bbb",fontSize:14 }}>目前沒有操作紀錄</div>:(
+                <div style={{ maxHeight:600,overflowY:"auto" }}>
+                  {Array.from(byDate.entries()).map(([dateKey, dayLogs])=>(
+                    <div key={dateKey}>
+                      <div style={{ padding:"8px 18px",background:"#faf7f0",fontWeight:700,fontSize:12,color:"#7a6850",borderBottom:"1px solid #f0ede8",position:"sticky",top:0 }}>📅 {dateKey} · {dayLogs.length} 筆</div>
+                      {dayLogs.map((log,idx)=>{
+                        const d=new Date(log.time);
+                        const ts=`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`;
+                        const isDayLast = idx === 0; // 因為 logs 是倒序，每個 dayLogs 的第一筆就是當日最新
+                        return (<div key={log.id} style={{ padding:"10px 18px",borderBottom:"1px solid #f5f3ef",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,fontSize:13 }}>
+                          <div style={{ flex:1,minWidth:0,display:"flex",alignItems:"center",gap:6 }}>
+                            <span style={{ color:"#999",fontSize:11,fontFamily:"monospace",minWidth:60 }}>{ts}</span>
+                            {isDayLast && <span title="當日最後一筆異動,適合作為還原首選" style={{ fontSize:11 }}>🌟</span>}
+                            <span style={{ wordBreak:"break-word" }}>{log.msg}</span>
+                          </div>
+                          {log.snapshot&&<button onClick={()=>undoTo(log)} style={{ padding:"4px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit",whiteSpace:"nowrap" }}>⟲ 還原到此</button>}
+                        </div>);
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          );
+        })()}
 
         {/* Event cards */}
         {!showLog&&["active","picked","done"].includes(tab)&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
@@ -1567,45 +1666,74 @@ export default function App() {
 
         {/* Timeline (時間軸) view */}
         {!showLog&&tab==="timeline"&&(<div style={{ display:"flex",flexDirection:"column",gap:12 }}>
+          {/* 篩選列 */}
+          {timelineData.length>0&&(() => {
+            // 統計各 kind 數量
+            const counts = {};
+            timelineData.forEach(d => d.items.forEach(it => { counts[it.kind] = (counts[it.kind]||0)+1; }));
+            const total = Object.values(counts).reduce((s,n)=>s+n,0);
+            const filters = [
+              { key:null, label:"全部", icon:"📋", count:total },
+              { key:"add", label:"新增", icon:"➕", count:counts.add||0, color:"#3a7a3a" },
+              { key:"remove", label:"移除", icon:"✖", count:counts.remove||0, color:"#c47070" },
+              { key:"qty", label:"票數", icon:"🔢", count:counts.qty||0, color:"#4a7aab" },
+              { key:"status", label:"狀態", icon:"🏷", count:counts.status||0, color:"#a87830" },
+              { key:"flag", label:"實名/SID/分票", icon:"📝", count:counts.flag||0, color:"#7a5a8b" },
+              { key:"batch", label:"分批", icon:"📦", count:counts.batch||0, color:"#5a7aab" },
+              { key:"price", label:"票價", icon:"💰", count:counts.price||0, color:"#3a8a7a" },
+              { key:"rename", label:"改名", icon:"✎", count:counts.rename||0, color:"#888" },
+              { key:"other", label:"其他", icon:"•", count:counts.other||0, color:"#999" },
+            ].filter(f => f.key===null || f.count>0);
+            return (
+              <div style={{ display:"flex",flexWrap:"wrap",gap:6,padding:"10px 12px",background:"#fff",borderRadius:12,border:"1px solid #e4e0d8" }}>
+                {filters.map(f => {
+                  const active = timelineFilter === f.key;
+                  return (
+                    <button key={f.key||"all"} onClick={()=>setTimelineFilter(f.key)}
+                      style={{ padding:"5px 11px",borderRadius:14,border:`1.5px solid ${active?(f.color||"#2d2a26"):"#e4e0d8"}`,background:active?(f.color||"#2d2a26"):"#fff",color:active?"#fff":(f.color||"#666"),fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4 }}>
+                      <span>{f.icon}</span>
+                      <span>{f.label}</span>
+                      <span style={{ fontSize:10,opacity:.85,fontWeight:600 }}>{f.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
           {timelineData.length===0?(
             <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",padding:"30px 20px",textAlign:"center",color:"#999" }}>
               <div style={{ fontSize:40,marginBottom:10 }}>📅</div>
-              <div style={{ fontWeight:700,marginBottom:6,color:"#555" }}>目前沒有帶日期的新增紀錄</div>
-              <div style={{ fontSize:13,lineHeight:1.7 }}>從今天起新增的訂購人都會依日期整理在這裡。<br/>先前從 Excel 匯入的資料沒有時間戳，可在「訂購人」分頁查看完整名單。</div>
+              <div style={{ fontWeight:700,marginBottom:6,color:"#555" }}>目前沒有異動紀錄</div>
+              <div style={{ fontSize:13,lineHeight:1.7 }}>從現在起所有的新增、修改、狀態變動都會記在這裡。</div>
             </div>
           ):(()=>{
             const s=search.toLowerCase();
             const fd=timelineData.map(day=>({
               date:day.date,
-              buyers:day.buyers.map(b=>({name:b.name,items:b.items.filter(it=>!search||b.name.toLowerCase().includes(s)||it.eventName.toLowerCase().includes(s))})).filter(b=>b.items.length>0)
-            })).filter(d=>d.buyers.length>0);
+              items:day.items.filter(it=>(timelineFilter===null||it.kind===timelineFilter)&&(!search||(it.msg||"").toLowerCase().includes(s)||(it.eventName||"").toLowerCase().includes(s)))
+            })).filter(d=>d.items.length>0);
             if(fd.length===0)return <div style={{ textAlign:"center",padding:40,color:"#999" }}>找不到結果</div>;
             return fd.map(day=>(
               <div key={day.date} className="anim-in" style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:"4px solid #8b7355" }}>
                 <div style={{ padding:"12px 18px",background:"#faf7f0",borderBottom:"1px solid #f0ede8",fontWeight:700,fontSize:15,color:"#5a4a36",display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap" }}>
                   <span>📅 {day.date}</span>
-                  <span style={{ fontSize:11,fontWeight:500,color:"#999" }}>{day.buyers.reduce((s,b)=>s+b.items.length,0)} 筆新增 · {day.buyers.reduce((s,b)=>s+b.items.reduce((x,i)=>x+i.qty,0),0)} 張</span>
+                  <span style={{ fontSize:11,fontWeight:500,color:"#999" }}>{day.items.length} 筆異動</span>
                 </div>
-                <div style={{ padding:"12px 18px",display:"flex",flexDirection:"column",gap:14 }}>
-                  {day.buyers.map(buyer=>(
-                    <div key={buyer.name}>
-                      <div style={{ fontWeight:700,fontSize:14,color:"#2d2a26",marginBottom:6 }}>{buyer.name} <span style={{ fontSize:11,color:"#999",fontWeight:500 }}>共 {buyer.items.reduce((s,i)=>s+i.qty,0)} 張</span></div>
-                      <div style={{ display:"flex",flexDirection:"column",gap:4,paddingLeft:12,borderLeft:"2px solid #e4e0d8" }}>
-                        {buyer.items.map((it,i)=>{
-                          const sc=BUYER_STATUS[it.st]||BUYER_STATUS.normal;
-                          const d=new Date(it.time);
-                          const ts=`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
-                          return (<div key={i} style={{ padding:"6px 10px",borderRadius:8,background:sc.bg,display:"flex",alignItems:"center",gap:8,fontSize:13,flexWrap:"wrap" }}>
-                            <span style={{ color:"#999",fontSize:11,fontFamily:"monospace" }}>{ts}</span>
-                            <span style={{ color:sc.color,fontWeight:600 }}>{it.eventName}</span>
-                            <span style={{ fontWeight:700 }}>+{it.qty}張</span>
-                            {it.st!=="normal"&&<span style={{ fontSize:10,padding:"1px 6px",borderRadius:8,background:"rgba(255,255,255,.6)",color:sc.color,fontWeight:600 }}>{sc.icon} {sc.label}</span>}
-                            <button onClick={()=>jumpToEvent(it.eventId,it.eventStatus)} style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",fontSize:10,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>前往</button>
-                          </div>);
-                        })}
-                      </div>
-                    </div>
-                  ))}
+                <div style={{ padding:"10px 14px",display:"flex",flexDirection:"column",gap:4 }}>
+                  {day.items.map(it=>{
+                    const d=new Date(it.time);
+                    const ts=`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+                    return (<div key={it.id} style={{ padding:"6px 10px",borderRadius:8,background:"#faf9f6",display:"flex",alignItems:"center",gap:8,fontSize:13,flexWrap:"wrap",borderLeft:`3px solid ${it.color}` }}>
+                      <span style={{ color:"#999",fontSize:11,fontFamily:"monospace",minWidth:38 }}>{ts}</span>
+                      <span style={{ fontSize:14 }}>{it.icon}</span>
+                      <span style={{ flex:1,color:"#2d2a26",minWidth:0,wordBreak:"break-word" }}>
+                        {it.eventName&&<span style={{ color:it.color,fontWeight:700 }}>{it.eventName}</span>}
+                        {it.eventName&&<span style={{ color:"#999",margin:"0 4px" }}>·</span>}
+                        <span style={{ color:"#555" }}>{it.restMsg||it.msg}</span>
+                      </span>
+                      {it.eventId&&<button onClick={()=>jumpToEvent(it.eventId,it.eventStatus)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",fontSize:10,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit",whiteSpace:"nowrap" }}>前往</button>}
+                    </div>);
+                  })}
                 </div>
               </div>
             ));
