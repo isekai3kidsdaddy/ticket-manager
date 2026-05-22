@@ -1280,7 +1280,6 @@ export default function App() {
                       {/* 實名資料清單（多筆）*/}
                       {(b.needRealName || (b.identities && b.identities.length > 0)) && (() => {
                         const idCount = (b.identities || []).length;
-                        const idCount = (b.identities || []).length;
                         const idQty = (b.identities || []).reduce((s,x)=>s+(x.qty||1),0);
                         const diff = idQty - totalQ;
                         const matches = diff === 0;
