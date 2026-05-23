@@ -2469,7 +2469,10 @@ export default function App() {
 // 已填的欄位不會被覆蓋
 function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
   const [showDropdown, setShowDropdown] = useState(false);
+  // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
+  const [pos, setPos] = useState({ dir: "down", maxH: 280 });
   const ref = useRef(null);
+  const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
   const dragRef = useRef({ y: 0, moved: false });
   useEffect(() => {
@@ -2477,6 +2480,31 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
+
+  // 開啟下拉時動態計算位置 / 高度,避免超出畫面
+  useEffect(() => {
+    if (!showDropdown) return;
+    const recalc = () => {
+      if (!inputRef.current) return;
+      const rect = inputRef.current.getBoundingClientRect();
+      const PAD = 20;
+      const below = window.innerHeight - rect.bottom - PAD;
+      const above = rect.top - PAD;
+      const PREFERRED = 280;
+      if (below >= 200 || below >= above) {
+        setPos({ dir: "down", maxH: Math.max(120, Math.min(PREFERRED, below)) });
+      } else {
+        setPos({ dir: "up", maxH: Math.max(120, Math.min(PREFERRED, above)) });
+      }
+    };
+    recalc();
+    window.addEventListener("resize", recalc);
+    window.addEventListener("scroll", recalc, true);
+    return () => {
+      window.removeEventListener("resize", recalc);
+      window.removeEventListener("scroll", recalc, true);
+    };
+  }, [showDropdown]);
 
   const q = (identity.name || "").trim().toLowerCase();
   const candidates = useMemo(() => {
@@ -2486,11 +2514,13 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
       if (q && !nmLc.includes(q)) continue;
       records.forEach(r => items.push({ name: nm, ...r }));
     }
-    // 排序:有 q 時,前綴 match 排前面;否則照中文 collation
+    // 排序:完全相符 > 前綴相符 > 子字串相符 > zh-TW 字母順
     if (q) {
       items.sort((a, b) => {
-        const aStart = a.name.toLowerCase().startsWith(q) ? 0 : 1;
-        const bStart = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const aL = a.name.toLowerCase(), bL = b.name.toLowerCase();
+        const aExact = aL === q ? 0 : 1, bExact = bL === q ? 0 : 1;
+        if (aExact !== bExact) return aExact - bExact;
+        const aStart = aL.startsWith(q) ? 0 : 1, bStart = bL.startsWith(q) ? 0 : 1;
         if (aStart !== bStart) return aStart - bStart;
         return a.name.localeCompare(b.name, "zh-TW");
       });
@@ -2523,6 +2553,7 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
     <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888",position:"relative" }} ref={ref}>
       <span style={{ fontWeight:600 }}>姓名</span>
       <input
+        ref={inputRef}
         value={identity.name || ""}
         onChange={e => { onFill({ name: e.target.value }); setShowDropdown(true); }}
         onFocus={() => setShowDropdown(true)}
@@ -2534,10 +2565,11 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
           onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
           onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
           style={{
-          position:"absolute", top:"100%", left:0, right:0, zIndex:20,
-          marginTop:2, background:"#fff", borderRadius:6,
-          border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
-          maxHeight:280, overflowY:"auto", WebkitOverflowScrolling:"touch"
+            position:"absolute", left:0, right:0, zIndex:20,
+            background:"#fff", borderRadius:6,
+            border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
+            maxHeight:pos.maxH, overflowY:"auto", WebkitOverflowScrolling:"touch",
+            ...(pos.dir === "down" ? { top:"100%", marginTop:2 } : { bottom:"100%", marginBottom:2 })
         }}>
           {candidates.map((c, ci) => (
             <div key={ci} onClick={() => { if (dragRef.current.moved) return; handlePick(c); }}
@@ -2568,15 +2600,58 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
 function AddBuyerRow({ eventId, buyerNames, onAdd }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [filter, setFilter] = useState("");
+  // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
+  const [pos, setPos] = useState({ dir: "down", maxH: 280 });
   const ref = useRef(null);
+  const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
   const dragRef = useRef({ y: 0, moved: false });
   useEffect(() => { const h = e => { if (ref.current && !ref.current.contains(e.target)) setShowDropdown(false); }; document.addEventListener("mousedown", h); return () => document.removeEventListener("mousedown", h); }, []);
-  const fl = buyerNames.filter(n => !filter || n.toLowerCase().includes(filter.toLowerCase()));
+
+  // 開啟下拉時動態計算位置 / 高度,避免超出畫面
+  useEffect(() => {
+    if (!showDropdown) return;
+    const recalc = () => {
+      if (!inputRef.current) return;
+      const rect = inputRef.current.getBoundingClientRect();
+      const PAD = 20;
+      const below = window.innerHeight - rect.bottom - PAD;
+      const above = rect.top - PAD;
+      const PREFERRED = 280;
+      // 下方空間 >= 200 或 >= 上方 → 往下;否則翻到上面
+      if (below >= 200 || below >= above) {
+        setPos({ dir: "down", maxH: Math.max(120, Math.min(PREFERRED, below)) });
+      } else {
+        setPos({ dir: "up", maxH: Math.max(120, Math.min(PREFERRED, above)) });
+      }
+    };
+    recalc();
+    window.addEventListener("resize", recalc);
+    window.addEventListener("scroll", recalc, true);
+    return () => {
+      window.removeEventListener("resize", recalc);
+      window.removeEventListener("scroll", recalc, true);
+    };
+  }, [showDropdown]);
+
+  const q = filter.trim().toLowerCase();
+  const fl = buyerNames.filter(n => !q || n.toLowerCase().includes(q));
+  // 排序:完全相符 > 前綴相符 > 子字串相符 > zh-TW 字母順
+  if (q) {
+    fl.sort((a, b) => {
+      const aL = a.toLowerCase(), bL = b.toLowerCase();
+      const aExact = aL === q ? 0 : 1, bExact = bL === q ? 0 : 1;
+      if (aExact !== bExact) return aExact - bExact;
+      const aStart = aL.startsWith(q) ? 0 : 1, bStart = bL.startsWith(q) ? 0 : 1;
+      if (aStart !== bStart) return aStart - bStart;
+      return a.localeCompare(b, "zh-TW");
+    });
+  }
+
   return (
     <div ref={ref} style={{ position:"relative",marginTop:10 }}>
       <div style={{ display:"flex",gap:6 }}>
-        <input value={filter} onChange={e=>{setFilter(e.target.value);setShowDropdown(true);}} onFocus={()=>setShowDropdown(true)} placeholder="選擇或輸入新客人名字..."
+        <input ref={inputRef} value={filter} onChange={e=>{setFilter(e.target.value);setShowDropdown(true);}} onFocus={()=>setShowDropdown(true)} placeholder="選擇或輸入新客人名字..."
           style={{ flex:1,padding:"8px 12px",borderRadius:8,border:"1.5px solid #d4d0c8",fontSize:14,fontFamily:"inherit",background:"#faf9f6" }}/>
         {filter.trim()&&!buyerNames.includes(filter.trim())&&(
           <button onClick={()=>{onAdd(eventId,filter.trim());setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",borderRadius:8,border:"none",background:"#2d2a26",color:"#faf9f6",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap" }}>＋ 新增「{filter.trim()}」</button>
@@ -2586,7 +2661,12 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
         <div
           onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
           onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
-          style={{ position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",maxHeight:280,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:10 }}>
+          style={{
+            position:"absolute",left:0,right:0,
+            background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",
+            maxHeight:pos.maxH,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:10,
+            ...(pos.dir === "down" ? { top:"100%", marginTop:4 } : { bottom:"100%", marginBottom:4 })
+          }}>
           {fl.map(name=>(<div key={name} onClick={()=>{ if (dragRef.current.moved) return; onAdd(eventId,name);setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",cursor:"pointer",fontSize:14,borderBottom:"1px solid #f5f3ef",transition:"background .1s" }} onMouseOver={e=>e.target.style.background="#f5f3ef"} onMouseOut={e=>e.target.style.background="transparent"}>{name}</div>))}
         </div>
       )}
