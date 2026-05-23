@@ -20,19 +20,30 @@ export async function loadFromSupabase() {
 
 // Optimistic concurrency control: 上傳前比對 lastKnownUpdatedAt
 // - 如果雲端的 updated_at 比 lastKnownUpdatedAt 新 → 表示有其他裝置改過 → 不要覆蓋
+// - 如果 lastKnownUpdatedAt 是 null 但雲端有資料 → 從未成功載入過 → 視為 stale,不直接覆蓋
+// - 若想強制覆蓋(例如匯入備份、衝突解決),傳 options = { force: true }
 // - 回傳 { ok: false, reason: "stale", remote: {...} } 讓上層決定怎麼處理
-export async function saveToSupabase(payload, lastKnownUpdatedAt) {
+export async function saveToSupabase(payload, lastKnownUpdatedAt, options) {
   if (!SUPABASE_READY) return { ok: false, reason: "no-config" };
+  const force = options && options.force;
 
-  // 1) 先檢查雲端目前的 updated_at
-  if (lastKnownUpdatedAt) {
+  // 1) 強制模式跳過 precheck;否則先檢查雲端目前的 updated_at
+  if (!force) {
     const { data: remote, error: readErr } = await supabase.from(TABLE).select("updated_at").eq("id", ROW_ID).maybeSingle();
     if (readErr) { console.warn("Supabase precheck error:", readErr); return { ok: false, reason: readErr.message }; }
-    if (remote && remote.updated_at && remote.updated_at !== lastKnownUpdatedAt) {
-      // 雲端有更新的版本，可能是其他裝置改的
-      // 把最新的拉下來給呼叫者，讓它決定要合併還是放棄
-      const fresh = await loadFromSupabase();
-      return { ok: false, reason: "stale", remote: fresh };
+
+    if (lastKnownUpdatedAt) {
+      // 有記錄 lastKnownUpdatedAt → 比對是否相符
+      if (remote && remote.updated_at && remote.updated_at !== lastKnownUpdatedAt) {
+        const fresh = await loadFromSupabase();
+        return { ok: false, reason: "stale", remote: fresh };
+      }
+    } else {
+      // 沒有 lastKnownUpdatedAt(從未成功載入)→ 若雲端已有資料則視為 stale
+      if (remote && remote.updated_at) {
+        const fresh = await loadFromSupabase();
+        return { ok: false, reason: "stale", remote: fresh };
+      }
     }
   }
 
