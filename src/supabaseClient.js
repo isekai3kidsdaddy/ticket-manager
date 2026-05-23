@@ -18,42 +18,76 @@ export async function loadFromSupabase() {
   return { payload: data.payload, updatedAt: data.updated_at };
 }
 
-// Optimistic concurrency control: 上傳前比對 lastKnownUpdatedAt
-// - 如果雲端的 updated_at 比 lastKnownUpdatedAt 新 → 表示有其他裝置改過 → 不要覆蓋
-// - 如果 lastKnownUpdatedAt 是 null 但雲端有資料 → 從未成功載入過 → 視為 stale,不直接覆蓋
-// - 若想強制覆蓋(例如匯入備份、衝突解決),傳 options = { force: true }
-// - 回傳 { ok: false, reason: "stale", remote: {...} } 讓上層決定怎麼處理
+// Atomic 條件式 update,避免兩台同時上傳時其中一台被悄悄覆蓋。
+// - 強制模式 (options.force = true):匯入備份、衝突解決用,直接 upsert 不檢查
+// - 正常模式:用 UPDATE ... WHERE id = ? AND updated_at = ? 做原子條件式寫入
+//   兩台同時通過 precheck 也只有一台能真的寫入,另一台會拿到 0 rows affected → stale
+// - 回傳 { ok: false, reason: "stale", remote: {...} } 讓上層做 3-way merge
 export async function saveToSupabase(payload, lastKnownUpdatedAt, options) {
   if (!SUPABASE_READY) return { ok: false, reason: "no-config" };
   const force = options && options.force;
+  const newTs = new Date().toISOString();
 
-  // 1) 強制模式跳過 precheck;否則先檢查雲端目前的 updated_at
-  if (!force) {
-    const { data: remote, error: readErr } = await supabase.from(TABLE).select("updated_at").eq("id", ROW_ID).maybeSingle();
-    if (readErr) { console.warn("Supabase precheck error:", readErr); return { ok: false, reason: readErr.message }; }
-
-    if (lastKnownUpdatedAt) {
-      // 有記錄 lastKnownUpdatedAt → 比對是否相符
-      if (remote && remote.updated_at && remote.updated_at !== lastKnownUpdatedAt) {
-        const fresh = await loadFromSupabase();
-        return { ok: false, reason: "stale", remote: fresh };
-      }
-    } else {
-      // 沒有 lastKnownUpdatedAt(從未成功載入)→ 若雲端已有資料則視為 stale
-      if (remote && remote.updated_at) {
-        const fresh = await loadFromSupabase();
-        return { ok: false, reason: "stale", remote: fresh };
-      }
-    }
+  // ── 強制模式:跳過所有檢查,直接 upsert ──
+  if (force) {
+    const { error } = await supabase.from(TABLE).upsert({
+      id: ROW_ID, payload, updated_at: newTs,
+    });
+    if (error) { console.warn("Supabase force save error:", error); return { ok: false, reason: error.message }; }
+    return { ok: true, updatedAt: newTs };
   }
 
-  // 2) 安全上傳
-  const newTs = new Date().toISOString();
-  const { error } = await supabase.from(TABLE).upsert({
-    id: ROW_ID,
-    payload,
-    updated_at: newTs,
-  });
-  if (error) { console.warn("Supabase save error:", error); return { ok: false, reason: error.message }; }
+  // ── 正常模式 ──
+  // 1) 讀目前雲端的 updated_at
+  const { data: remote, error: readErr } = await supabase.from(TABLE).select("updated_at").eq("id", ROW_ID).maybeSingle();
+  if (readErr) { console.warn("Supabase precheck error:", readErr); return { ok: false, reason: readErr.message }; }
+
+  // 2) 雲端 row 不存在 → 第一次寫入 (insert)
+  if (!remote) {
+    if (lastKnownUpdatedAt) {
+      // 我們記得 lastKnownUpdatedAt 不是 null,但雲端 row 不見了 → 異常,當 stale
+      return { ok: false, reason: "stale", remote: null };
+    }
+    const { error: insertErr } = await supabase.from(TABLE).insert({
+      id: ROW_ID, payload, updated_at: newTs,
+    });
+    if (insertErr) {
+      // Insert 失敗 (可能是 race:另一台同時 insert,撞 primary key) → 重讀當 stale
+      console.warn("Supabase insert error:", insertErr);
+      const fresh = await loadFromSupabase();
+      return { ok: false, reason: "stale", remote: fresh };
+    }
+    return { ok: true, updatedAt: newTs };
+  }
+
+  // 3) Row 存在,但我們從沒成功 load 過 (lastKnownUpdatedAt=null) → 不能直接覆蓋
+  if (!lastKnownUpdatedAt) {
+    const fresh = await loadFromSupabase();
+    return { ok: false, reason: "stale", remote: fresh };
+  }
+
+  // 4) Row 存在且我們知道上次的 TS,但 precheck 已發現雲端 TS 不符 → stale
+  if (remote.updated_at !== lastKnownUpdatedAt) {
+    const fresh = await loadFromSupabase();
+    return { ok: false, reason: "stale", remote: fresh };
+  }
+
+  // 5) Atomic 條件式 update:只在 updated_at 還是 lastKnownUpdatedAt 時才寫入
+  //    .select() 讓回傳值帶上實際被改的列,可以判斷是否真的有命中
+  const { data: updated, error: updateErr } = await supabase
+    .from(TABLE)
+    .update({ payload, updated_at: newTs })
+    .eq("id", ROW_ID)
+    .eq("updated_at", lastKnownUpdatedAt)
+    .select();
+
+  if (updateErr) { console.warn("Supabase update error:", updateErr); return { ok: false, reason: updateErr.message }; }
+
+  if (!updated || updated.length === 0) {
+    // 0 rows affected → 另一台在我們 precheck 跟 update 之間搶先寫入 → stale
+    const fresh = await loadFromSupabase();
+    return { ok: false, reason: "stale", remote: fresh };
+  }
+
   return { ok: true, updatedAt: newTs };
 }
