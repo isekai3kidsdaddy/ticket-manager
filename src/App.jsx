@@ -1229,6 +1229,37 @@ export default function App() {
     return Array.from(map.values()).sort((a, b) => b.totalQty - a.totalQty);
   }, [events]);
 
+  // 實名資料記憶:依姓名收集歷史紀錄,給 autocomplete 用
+  // 結構: Map<name, Array<{phone, idNumber, tixAccount, loginVia, locked}>>
+  // 同名但身分證/電話/拓元帳號完全不同 → 視為不同人,各收一筆
+  // 注意:不收 memberNo (每場不同) 也不收 qty
+  const identityHistory = useMemo(() => {
+    const map = new Map();
+    // 由新到舊掃 (events 後面通常是後加的),這樣下拉列表新的在前面
+    for (let ei = events.length - 1; ei >= 0; ei--) {
+      const evt = events[ei];
+      for (const b of (evt.buyers || [])) {
+        for (const it of (b.identities || [])) {
+          const nm = (it.name || "").trim();
+          if (!nm) continue;
+          if (!map.has(nm)) map.set(nm, []);
+          const list = map.get(nm);
+          // 去重 key:身分證 + 電話 + 拓元帳號 三項組合
+          const dedupKey = `${it.idNumber || ""}|${it.phone || ""}|${it.tixAccount || ""}`;
+          if (list.some(x => `${x.idNumber || ""}|${x.phone || ""}|${x.tixAccount || ""}` === dedupKey)) continue;
+          list.push({
+            phone: it.phone || "",
+            idNumber: it.idNumber || "",
+            tixAccount: it.tixAccount || "",
+            loginVia: it.loginVia || "",
+            locked: !!it.locked,
+          });
+        }
+      }
+    }
+    return map;
+  }, [events]);
+
   // Timeline data: group by date → by buyer (for 時間軸 tab)
   const timelineData = useMemo(() => {
     // 從 logs 撈所有異動，解析動作類型 + 對應的場次（讓「前往」按鈕能用）
@@ -2095,17 +2126,22 @@ export default function App() {
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
-                                  {it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
-                                  {it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
+                                  {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
+                                  {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
                                   <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
                                 {isOpen && (
                                   <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
+                                    <IdentityNameAutocomplete
+                                      identity={it}
+                                      history={identityHistory}
+                                      isTix={evt.tixOnly !== false}
+                                      onFill={updates=>updateIdentity(evt.id,i,it.id,updates)}
+                                    />
+                                    {/* 通用欄位:不分系統都需要 */}
                                     {[
-                                      { key:"name", label:"姓名", ph:"中文姓名" },
                                       { key:"phone", label:"電話", ph:"09xx..." },
                                       { key:"idNumber", label:"身分證", ph:"A123..." },
-                                      { key:"tixAccount", label:"拓元帳號", ph:"帳號 / Email" },
                                       { key:"memberNo", label:"會員編號", ph:"" },
                                     ].map(field => (
                                       <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
@@ -2114,19 +2150,31 @@ export default function App() {
                                           style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
                                       </label>
                                     ))}
-                                    <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
-                                      <span style={{ fontWeight:600 }}>登入方式</span>
-                                      <select value={it.loginVia||""} onChange={e=>updateIdentity(evt.id,i,it.id,{loginVia:e.target.value})}
-                                        style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}>
-                                        <option value="">未選</option>
-                                        <option value="facebook">Facebook</option>
-                                        <option value="google">Google</option>
-                                      </select>
-                                    </label>
-                                    <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:11,color:"#666",cursor:"pointer",alignSelf:"end",padding:"5px 0" }}>
-                                      <input type="checkbox" checked={!!it.locked} onChange={e=>updateIdentity(evt.id,i,it.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
-                                      <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
-                                    </label>
+                                    {/* 拓元專屬欄位:只有 evt.tixOnly !== false 時顯示 */}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>拓元帳號</span>
+                                        <input value={it.tixAccount||""} onChange={e=>updateIdentity(evt.id,i,it.id,{tixAccount:e.target.value})} placeholder="帳號 / Email"
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                      </label>
+                                    )}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
+                                        <span style={{ fontWeight:600 }}>登入方式</span>
+                                        <select value={it.loginVia||""} onChange={e=>updateIdentity(evt.id,i,it.id,{loginVia:e.target.value})}
+                                          style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}>
+                                          <option value="">未選</option>
+                                          <option value="facebook">Facebook</option>
+                                          <option value="google">Google</option>
+                                        </select>
+                                      </label>
+                                    )}
+                                    {(evt.tixOnly !== false) && (
+                                      <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:11,color:"#666",cursor:"pointer",alignSelf:"end",padding:"5px 0" }}>
+                                        <input type="checkbox" checked={!!it.locked} onChange={e=>updateIdentity(evt.id,i,it.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+                                        <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
+                                      </label>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -2169,6 +2217,19 @@ export default function App() {
                 <AddBuyerRow eventId={evt.id} buyerNames={buyerNames} onAdd={addBuyerToEvent}/>
                 {evt.note&&<div style={{ marginTop:8,fontSize:12,color:"#8b7355",background:"#faf7f0",padding:"6px 10px",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center" }}><span>備註：{evt.note}</span><button onClick={()=>setInputModal({title:"編輯場次備註",label:"備註",defaultValue:evt.note||"",onSave:v=>{updateEvent(evt.id,e=>{e.note=v||undefined;return e;});setInputModal(null);}})} style={{ background:"none",border:"none",fontSize:11,color:"#8b7355",cursor:"pointer",fontWeight:600,fontFamily:"inherit" }}>編輯</button></div>}
                 <div style={{ display:"flex",gap:8,marginTop:10,flexWrap:"wrap" }}>
+                  {/* 售票系統 toggle:預設拓元,點一下切換到「其他系統」 */}
+                  <button onClick={()=>{
+                    const wasTixOn = evt.tixOnly !== false;
+                    const newVal = !wasTixOn;
+                    addLog(`【${evt.name}】售票系統→${newVal?"拓元":"其他"}`,snap());
+                    updateEvent(evt.id,e=>{ e.tixOnly = newVal; return e; });
+                  }} style={(evt.tixOnly !== false) ? {
+                    padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#faf7f0",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit"
+                  } : {
+                    padding:"6px 14px",borderRadius:8,border:"1px solid #c4d0d8",background:"#eef2f5",fontSize:12,cursor:"pointer",fontWeight:700,color:"#5a7080",fontFamily:"inherit"
+                  }} title="點一下切換售票系統 (影響實名欄位顯示)">
+                    {(evt.tixOnly !== false) ? "🎫 拓元場" : "🌐 非拓元場"}
+                  </button>
                   {evt.status==="active"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 全部已取票</button>}
                   {(evt.buyers||[]).some(b=>(b.identities||[]).length>0)&&<button onClick={()=>setIdentityExportModal({events:[evt],title:evt.name})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出本場實名</button>}
                   {(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"))&&<button onClick={()=>{
@@ -2392,7 +2453,7 @@ export default function App() {
       {showAddEvent&&(<div style={{ position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={()=>setShowAddEvent(false)}>
         <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:18,padding:"28px 24px",width:"100%",maxWidth:400,boxShadow:"0 20px 60px rgba(0,0,0,.2)" }}>
           <h3 style={{ margin:"0 0 20px",fontSize:18,fontWeight:700 }}>新增場次</h3>
-          <AddEventForm onAdd={(name,price)=>{ addLog(`新增場次【${name}】`,snap()); setEvents(evs=>[...evs,{id:gid(),name,price,status:"active",buyers:[]}]); setShowAddEvent(false); }}/>
+          <AddEventForm onAdd={(name,price)=>{ addLog(`新增場次【${name}】`,snap()); setEvents(evs=>[...evs,{id:gid(),name,price,status:"active",tixOnly:true,buyers:[]}]); setShowAddEvent(false); }}/>
         </div>
       </div>)}
 
@@ -2400,6 +2461,101 @@ export default function App() {
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
     </div>
+  );
+}
+
+// 實名姓名 input 帶 autocomplete:輸入時下拉顯示歷史候選,
+// 點選後一鍵帶入 phone / idNumber / tixAccount / loginVia / locked (memberNo 不帶,每場不同)
+// 已填的欄位不會被覆蓋
+function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
+  const [showDropdown, setShowDropdown] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setShowDropdown(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  const q = (identity.name || "").trim().toLowerCase();
+  const candidates = useMemo(() => {
+    const items = [];
+    for (const [nm, records] of history.entries()) {
+      const nmLc = nm.toLowerCase();
+      if (q && !nmLc.includes(q)) continue;
+      records.forEach(r => items.push({ name: nm, ...r }));
+    }
+    // 排序:有 q 時,前綴 match 排前面;否則照中文 collation
+    if (q) {
+      items.sort((a, b) => {
+        const aStart = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bStart = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        if (aStart !== bStart) return aStart - bStart;
+        return a.name.localeCompare(b.name, "zh-TW");
+      });
+    } else {
+      items.sort((a, b) => a.name.localeCompare(b.name, "zh-TW"));
+    }
+    return items.slice(0, 30); // 最多 30 筆,避免下拉太長
+  }, [history, q]);
+
+  const handlePick = (record) => {
+    // 只填空欄位 (不覆蓋使用者已經填的)
+    const updates = { name: record.name };
+    if (!identity.phone) updates.phone = record.phone || "";
+    if (!identity.idNumber) updates.idNumber = record.idNumber || "";
+    // 拓元專屬欄位:非拓元場不帶,避免悄悄寫入隱藏欄位造成困惑
+    if (isTix) {
+      if (!identity.tixAccount) updates.tixAccount = record.tixAccount || "";
+      if (!identity.loginVia) updates.loginVia = record.loginVia || "";
+      if (identity.locked === undefined || identity.locked === null) {
+        updates.locked = !!record.locked;
+      }
+    }
+    // 注意:不填 memberNo (每場不同) 也不填 qty (是當前場次的張數)
+    onFill(updates);
+    setShowDropdown(false);
+  };
+
+  return (
+    <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888",position:"relative" }} ref={ref}>
+      <span style={{ fontWeight:600 }}>姓名</span>
+      <input
+        value={identity.name || ""}
+        onChange={e => { onFill({ name: e.target.value }); setShowDropdown(true); }}
+        onFocus={() => setShowDropdown(true)}
+        placeholder="中文姓名 (打字看歷史)"
+        style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}
+      />
+      {showDropdown && candidates.length > 0 && (
+        <div style={{
+          position:"absolute", top:"100%", left:0, right:0, zIndex:20,
+          marginTop:2, background:"#fff", borderRadius:6,
+          border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
+          maxHeight:220, overflowY:"auto"
+        }}>
+          {candidates.map((c, ci) => (
+            <div key={ci} onClick={() => handlePick(c)}
+              style={{
+                padding:"7px 10px", cursor:"pointer",
+                borderBottom: ci < candidates.length - 1 ? "1px solid #f0ede8" : "none",
+                fontFamily:"inherit"
+              }}
+              onMouseOver={e => e.currentTarget.style.background = "#faf7f0"}
+              onMouseOut={e => e.currentTarget.style.background = "transparent"}>
+              <div style={{ fontSize:13, fontWeight:700, color:"#2d2a26" }}>{c.name}</div>
+              <div style={{ fontSize:10, color:"#999", marginTop:2, display:"flex", gap:8, flexWrap:"wrap" }}>
+                {c.idNumber && <span>🆔 {c.idNumber}</span>}
+                {c.phone && <span>📱 {c.phone}</span>}
+                {isTix && c.tixAccount && <span>🎫 {c.tixAccount}</span>}
+                {isTix && c.loginVia === "facebook" && <span>FB</span>}
+                {isTix && c.loginVia === "google" && <span>G</span>}
+                {isTix && c.locked && <span style={{ color:"#c47070" }}>🔒</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </label>
   );
 }
 
