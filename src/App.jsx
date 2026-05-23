@@ -519,6 +519,7 @@ export default function App() {
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
+  const [editingCatalogKey, setEditingCatalogKey] = useState(null); // 實名簿正在編輯的 key
   const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
 
@@ -1084,7 +1085,7 @@ export default function App() {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1093,7 +1094,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
 
   // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
@@ -1130,7 +1131,7 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < 30000) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
       try {
         const newEvents = JSON.parse(e.newValue);
         if (Array.isArray(newEvents)) {
@@ -1146,7 +1147,7 @@ export default function App() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1165,7 +1166,7 @@ export default function App() {
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
 
       try {
         const res = await loadFromSupabase();
@@ -1196,7 +1197,7 @@ export default function App() {
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1260,6 +1261,77 @@ export default function App() {
     return map;
   }, [events]);
 
+  // 實名簿:每個獨立的實名資料一筆,附帶引用的場次清單
+  // 結構:[{ key, name, phone, idNumber, tixAccount, loginVia, locked, refs: [{eventId, eventName, eventStatus, buyerName, identityId}] }]
+  // 用相同的 dedup key (name|idNumber|phone|tixAccount),每個獨立組合一張卡
+  const identityCatalog = useMemo(() => {
+    const map = new Map();
+    (events || []).forEach(evt => {
+      (evt.buyers || []).forEach(b => {
+        (b.identities || []).forEach(it => {
+          const nm = (it.name || "").trim();
+          if (!nm) return;
+          const key = `${nm}|${it.idNumber || ""}|${it.phone || ""}|${it.tixAccount || ""}`;
+          if (!map.has(key)) {
+            map.set(key, {
+              key,
+              name: nm,
+              phone: it.phone || "",
+              idNumber: it.idNumber || "",
+              tixAccount: it.tixAccount || "",
+              loginVia: it.loginVia || "",
+              locked: !!it.locked,
+              refs: [],
+            });
+          }
+          map.get(key).refs.push({
+            eventId: evt.id,
+            eventName: evt.name,
+            eventStatus: evt.status,
+            buyerName: b.name,
+            identityId: it.id,
+          });
+        });
+      });
+    });
+    // 依 zh-TW 字母順
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, "zh-TW"));
+  }, [events]);
+
+  // 批次更新:把 identityCatalog 的某筆改成新值,同步寫進所有引用該筆的 events 中
+  // newValues 只動 name / phone / idNumber / tixAccount / loginVia / locked
+  // 不動 memberNo (每場不同) 也不動 qty (場次相關)
+  const updateIdentityAcrossEvents = (oldKey, newValues) => {
+    const entry = identityCatalog.find(e => e.key === oldKey);
+    if (!entry) return;
+    // 建立 (eventId, identityId) → true 的快查表
+    const refSet = new Set(entry.refs.map(r => `${r.eventId}|${r.identityId}`));
+    // 只 update 有資料的 newValues 欄位,避免不小心把已填的清空
+    const cleanUpdates = {};
+    ["name","phone","idNumber","tixAccount","loginVia"].forEach(k => {
+      if (newValues[k] !== undefined) cleanUpdates[k] = newValues[k];
+    });
+    if (newValues.locked !== undefined) cleanUpdates.locked = !!newValues.locked;
+    addLog(`📇 批次更新實名「${entry.name}」(${entry.refs.length} 個場次)`, snap());
+    setEvents(prev => prev.map(evt => {
+      // 沒被引用就跳過,效能最佳化
+      const hasRef = entry.refs.some(r => r.eventId === evt.id);
+      if (!hasRef) return evt;
+      return {
+        ...evt,
+        buyers: (evt.buyers || []).map(b => ({
+          ...b,
+          identities: (b.identities || []).map(it => {
+            if (refSet.has(`${evt.id}|${it.id}`)) {
+              return { ...it, ...cleanUpdates };
+            }
+            return it;
+          }),
+        })),
+      };
+    }));
+  };
+
   // Timeline data: group by date → by buyer (for 時間軸 tab)
   const timelineData = useMemo(() => {
     // 從 logs 撈所有異動，解析動作類型 + 對應的場次（讓「前往」按鈕能用）
@@ -1278,7 +1350,7 @@ export default function App() {
       else if (/^移除「/.test(rest))        { kind = "remove"; icon = "✖";  color = "#c47070"; }
       else if (/張數/.test(rest))           { kind = "qty";    icon = "🔢"; color = "#4a7aab"; }
       else if (/狀態/.test(rest) || /待退費|已退款|已取票|未付款/.test(rest)) { kind = "status"; icon = "🏷"; color = "#a87830"; }
-      else if (/實名|SID|給票|回傳照|帳號鎖/.test(rest)) { kind = "flag"; icon = "📝"; color = "#7a5a8b"; }
+      else if (/實名|SID|給票|回傳照|帳號鎖|售票系統/.test(rest) || /批次更新實名/.test(msg)) { kind = "flag"; icon = "📝"; color = "#7a5a8b"; }
       else if (/票價/.test(rest))           { kind = "price";  icon = "💰"; color = "#3a8a7a"; }
       else if (/分批/.test(rest))           { kind = "batch";  icon = "📦"; color = "#5a7aab"; }
       else if (/改名/.test(msg))            { kind = "rename"; icon = "✎";  color = "#888"; }
@@ -1803,7 +1875,7 @@ export default function App() {
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
               const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"timeline",label:`📅 時間軸`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -2372,6 +2444,67 @@ export default function App() {
           })()}
         </div>)}
 
+        {/* Identity (實名簿) view */}
+        {!showLog&&tab==="identity"&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+          {(() => {
+            const s = search.toLowerCase();
+            const fc = search ? identityCatalog.filter(e => e.name.toLowerCase().includes(s) || (e.phone||"").includes(s) || (e.idNumber||"").toLowerCase().includes(s) || (e.tixAccount||"").toLowerCase().includes(s)) : identityCatalog;
+            if (fc.length === 0) return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前還沒有實名資料"}</div>;
+            return (<>
+              <div style={{ background:"#fff3e0",borderRadius:12,border:"1px solid #e6b87a",padding:"10px 14px",fontSize:12,color:"#7a5a30",lineHeight:1.6 }}>
+                📇 共 {identityCatalog.length} 筆獨立實名資料{search?` · 篩選後 ${fc.length} 筆`:""}<br/>
+                <span style={{ fontSize:11,color:"#a08850" }}>同名但身分證/電話/拓元帳號不同 → 算成不同筆。在這邊改一筆會「同步」到所有使用該筆的場次。</span>
+              </div>
+              {fc.map(entry => {
+                const isEditing = editingCatalogKey === entry.key;
+                return (<div key={entry.key} className="anim-in" style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:"4px solid #8b7355" }}>
+                  {isEditing ? (
+                    <IdentityCatalogEditor
+                      entry={entry}
+                      onSave={form => {
+                        setConfirmModal({
+                          msg:`這個動作會更新 ${entry.refs.length} 個場次裡的「${entry.name}」實名資料。
+
+確定要批改嗎？`,
+                          yesLabel:"✓ 確定批改",
+                          onYes:()=>{
+                            updateIdentityAcrossEvents(entry.key, form);
+                            setEditingCatalogKey(null);
+                            setConfirmModal(null);
+                          }
+                        });
+                      }}
+                      onCancel={()=>setEditingCatalogKey(null)}
+                    />
+                  ) : (
+                    <div style={{ padding:"14px 18px" }}>
+                      <div style={{ display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:8 }}>
+                        <span style={{ fontWeight:700,fontSize:16 }}>{entry.name}</span>
+                        <span style={{ fontSize:12,fontWeight:700,padding:"2px 10px",borderRadius:12,background:"#f0ede8",color:"#8b7355" }}>{entry.refs.length} 場次</span>
+                        {entry.locked && <span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,background:"#fce8e8",color:"#8b3a3a" }}>🔒 帳號鎖</span>}
+                        <button onClick={()=>setEditingCatalogKey(entry.key)} style={{ marginLeft:"auto",padding:"5px 14px",borderRadius:7,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b7355",fontFamily:"inherit" }}>編輯</button>
+                      </div>
+                      <div style={{ display:"flex",gap:14,flexWrap:"wrap",fontSize:13,color:"#555",marginBottom:10 }}>
+                        <span>📱 {entry.phone||<span style={{ color:"#bbb" }}>(未填)</span>}</span>
+                        <span>🆔 {entry.idNumber||<span style={{ color:"#bbb" }}>(未填)</span>}</span>
+                        <span>🎫 {entry.tixAccount||<span style={{ color:"#bbb" }}>(未填)</span>}</span>
+                        {entry.loginVia && <span>登入: {entry.loginVia === "facebook" ? "FB" : "Google"}</span>}
+                      </div>
+                      <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+                        {entry.refs.map((r, i) => {
+                          const sl = r.eventStatus==="done"?"已完成":r.eventStatus==="picked"?"已取票":"進行中";
+                          const sc = r.eventStatus==="done"?{bg:"#f0ede8",color:"#8b7355"}:r.eventStatus==="picked"?{bg:"#e0eef6",color:"#2d6a8b"}:{bg:"#dfeadf",color:"#4a6b4a"};
+                          return (<button key={i} onClick={()=>jumpToEvent(r.eventId, r.eventStatus)} style={{ padding:"4px 10px",borderRadius:8,border:`1px solid ${sc.color}33`,background:sc.bg,fontSize:11,cursor:"pointer",fontWeight:600,color:sc.color,fontFamily:"inherit" }} title={`${sl} · 訂購人: ${r.buyerName} · 點擊前往`}>{r.eventName} <span style={{ opacity:.6 }}>({r.buyerName})</span> →</button>);
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>);
+              })}
+            </>);
+          })()}
+        </div>)}
+
         {/* Timeline (時間軸) view */}
         {!showLog&&tab==="timeline"&&(<div style={{ display:"flex",flexDirection:"column",gap:12 }}>
           {/* 篩選列 */}
@@ -2615,6 +2748,58 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
         </div>
       )}
     </label>
+  );
+}
+
+// 實名簿編輯器:單一卡片內的編輯模式,儲存時呼叫 onSave 帶上新值
+function IdentityCatalogEditor({ entry, onSave, onCancel }) {
+  const [form, setForm] = useState({
+    name: entry.name,
+    phone: entry.phone,
+    idNumber: entry.idNumber,
+    tixAccount: entry.tixAccount,
+    loginVia: entry.loginVia,
+    locked: entry.locked,
+  });
+  const update = (patch) => setForm(prev => ({ ...prev, ...patch }));
+  return (
+    <div style={{ padding:"14px 18px",background:"#fff9ec",borderTop:"1px dashed #d8c4a8" }}>
+      <div style={{ display:"flex",alignItems:"baseline",gap:10,marginBottom:10 }}>
+        <span style={{ fontSize:13,fontWeight:700,color:"#7a5a30" }}>編輯實名資料</span>
+        <span style={{ fontSize:11,color:"#a08850" }}>(會同步到 {entry.refs.length} 個場次)</span>
+      </div>
+      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))",gap:10,marginBottom:12 }}>
+        {[
+          { key:"name", label:"姓名", ph:"中文姓名" },
+          { key:"phone", label:"電話", ph:"09xx..." },
+          { key:"idNumber", label:"身分證", ph:"A123..." },
+          { key:"tixAccount", label:"拓元帳號", ph:"帳號 / Email" },
+        ].map(field => (
+          <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:3,fontSize:11,color:"#888" }}>
+            <span style={{ fontWeight:600 }}>{field.label}</span>
+            <input value={form[field.key]||""} onChange={e=>update({[field.key]: e.target.value})} placeholder={field.ph}
+              style={{ padding:"7px 10px",borderRadius:6,border:"1px solid #d4d0c8",fontSize:13,fontFamily:"inherit",background:"#fff" }}/>
+          </label>
+        ))}
+        <label style={{ display:"flex",flexDirection:"column",gap:3,fontSize:11,color:"#888" }}>
+          <span style={{ fontWeight:600 }}>登入方式</span>
+          <select value={form.loginVia||""} onChange={e=>update({loginVia: e.target.value})}
+            style={{ padding:"7px 10px",borderRadius:6,border:"1px solid #d4d0c8",fontSize:13,fontFamily:"inherit",background:"#fff" }}>
+            <option value="">未選</option>
+            <option value="facebook">Facebook</option>
+            <option value="google">Google</option>
+          </select>
+        </label>
+        <label style={{ display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#666",cursor:"pointer",alignSelf:"end",padding:"7px 0" }}>
+          <input type="checkbox" checked={!!form.locked} onChange={e=>update({locked: e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+          <span style={{ fontWeight:600 }}>🔒 拓元帳號被鎖</span>
+        </label>
+      </div>
+      <div style={{ display:"flex",gap:8,justifyContent:"flex-end" }}>
+        <button onClick={onCancel} style={{ padding:"7px 16px",borderRadius:7,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#999",fontFamily:"inherit" }}>取消</button>
+        <button onClick={()=>onSave(form)} style={{ padding:"7px 18px",borderRadius:7,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:12,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>儲存(批改)</button>
+      </div>
+    </div>
   );
 }
 
