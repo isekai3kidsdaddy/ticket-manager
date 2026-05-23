@@ -762,36 +762,54 @@ export default function App() {
     }, 800);
   }, [events, buyerNames, logs]);
 
-  // 3) Manual refetch
+  // 安全 refetch:用 mergeEvents 智慧合併,保留本地未上傳的修改
   const refetchFromCloud = async () => {
     if (!SUPABASE_READY) return;
     setSyncStatus("loading");
+    // 5 秒 timeout 保護,避免 syncStatus 卡住
+    const safetyTimer = setTimeout(() => {
+      setSyncStatus(prev => prev === "loading" ? "error" : prev);
+    }, 5000);
     try {
       const res = await loadFromSupabase();
+      clearTimeout(safetyTimer);
       if (res && res.payload) {
-        const p = res.payload;
-        if (Array.isArray(p.events)) setEvents(p.events);
-        if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
-        if (Array.isArray(p.logs)) setLogs(p.logs);
+        const remoteP = res.payload;
+        // 用 mergeEvents 合併,而不是直接覆蓋
+        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+        const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
+        const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
+        const mergedLogs = mergeLogs(logs, remoteP.logs || []);
+
+        // 如果有衝突,不要靜默覆蓋。把雲端拉下來但保留本地修改(本地優先)
+        const finalEvents = mergeResult.merged;
+        setEvents(finalEvents);
+        setBuyerNames(mergedNames);
+        setLogs(mergedLogs);
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
-        lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
-        baseSnapshotRef.current = { events: p.events||[], buyerNames: p.buyerNames||[], logs: p.logs||[] };
+        lastSavedSignature.current = makeSignature(finalEvents, mergedNames, mergedLogs);
+        baseSnapshotRef.current = { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
       }
       setSyncStatus("saved");
-    } catch {
+    } catch (e) {
+      clearTimeout(safetyTimer);
+      console.warn("refetch failed:", e);
       setSyncStatus("error");
     }
   };
 
-  // 4) 頁面回到前景時:只「拉雲端最新版」,不會主動上傳。
-  // 防止「對方視窗開著沒動」的情境誤觸上傳。
+  // 4) 頁面回到前景時:用智慧合併拉雲端,但「正在編輯/正在上傳」時不打斷
   useEffect(() => {
     if (!SUPABASE_READY) return;
     const onVisible = () => {
-      if (document.visibilityState === "visible" && initialLoadDone.current) {
-        refetchFromCloud();
-      }
+      if (document.visibilityState !== "visible") return;
+      if (!initialLoadDone.current) return;
+      // 正在準備上傳(有 pending changes) → 不要 refetch 覆蓋
+      if (saveTimer.current) return;
+      // 30 秒內有互動 → 使用者正在用,不打斷
+      if (Date.now() - lastInteractionRef.current < 30000) return;
+      refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
@@ -799,7 +817,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, []);
+  }, [events, buyerNames, logs]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -810,6 +828,8 @@ export default function App() {
       if (!initialLoadDone.current) return;
       if (document.visibilityState !== "visible") return; // 背景中不 poll
       if (saveTimer.current) return; // 正在準備上傳,跳過這次
+      // 30 秒內有互動 → 使用者正在打字/點擊,不打斷
+      if (Date.now() - lastInteractionRef.current < 30000) return;
 
       try {
         const res = await loadFromSupabase();
