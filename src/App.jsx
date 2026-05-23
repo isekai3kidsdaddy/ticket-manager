@@ -2470,7 +2470,7 @@ export default function App() {
 function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
   const [showDropdown, setShowDropdown] = useState(false);
   // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
-  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, anchorTop: 0, anchorBottom: 0 });
+  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, topPx: 0, bottomPx: 0 });
   const ref = useRef(null);
   const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
@@ -2487,17 +2487,36 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
     const recalc = () => {
       if (!inputRef.current) return;
       const rect = inputRef.current.getBoundingClientRect();
+      // 偵測祖先的 CSS zoom (桌機是 1.3,手機是 1)
+      // getBoundingClientRect 回傳的是視覺座標 (已乘 zoom),
+      // 但 fixed 元素的 top/left 又會再被 zoom 一次 → 必須除以 zoom 抵消
+      let zoom = 1;
+      try {
+        const bz = parseFloat(getComputedStyle(document.body).zoom) || 1;
+        const hz = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+        zoom = bz * hz;
+      } catch {}
+      // 全部轉成 layout 單位
+      const lLeft = rect.left / zoom;
+      const lWidth = rect.width / zoom;
+      const lTop = rect.top / zoom;
+      const lBottom = rect.bottom / zoom;
+      const lVh = window.innerHeight / zoom;
       const PAD = 8;
-      const vh = window.innerHeight;
-      const below = vh - rect.bottom - PAD;
-      const above = rect.top - PAD;
+      const below = lVh - lBottom - PAD;
+      const above = lTop - PAD;
       // PREFERRED:取「440px」跟「視窗 70%」較小者
-      const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
+      const PREFERRED = Math.min(440, Math.floor(lVh * 0.7));
       // 因為改 position:fixed,maxH 直接夾在可用空間內,不會超出螢幕
       let dir, maxH;
       if (below >= above) { dir = "down"; maxH = Math.min(PREFERRED, Math.max(120, below)); }
       else { dir = "up"; maxH = Math.min(PREFERRED, Math.max(120, above)); }
-      setPos({ dir, maxH, left: rect.left, width: rect.width, anchorTop: rect.top, anchorBottom: rect.bottom });
+      setPos({
+        dir, maxH,
+        left: lLeft, width: lWidth,
+        topPx: lBottom + 4,
+        bottomPx: lVh - lTop + 4,
+      });
     };
     recalc();
     window.addEventListener("resize", recalc);
@@ -2571,7 +2590,7 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
             background:"#fff", borderRadius:6,
             border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
             maxHeight:pos.maxH, overflowY:"auto", WebkitOverflowScrolling:"touch",
-            ...(pos.dir === "down" ? { top:pos.anchorBottom + 2 } : { bottom:(window.innerHeight - pos.anchorTop) + 2 })
+            ...(pos.dir === "down" ? { top:pos.topPx - 2 } : { bottom:pos.bottomPx - 2 })
         }}>
           {candidates.map((c, ci) => (
             <div key={ci} onClick={() => { if (dragRef.current.moved) return; handlePick(c); }}
@@ -2603,7 +2622,7 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [filter, setFilter] = useState("");
   // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
-  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, anchorTop: 0, anchorBottom: 0 });
+  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, topPx: 0, bottomPx: 0 });
   const ref = useRef(null);
   const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
@@ -2616,17 +2635,36 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
     const recalc = () => {
       if (!inputRef.current) return;
       const rect = inputRef.current.getBoundingClientRect();
+      // 偵測祖先的 CSS zoom (桌機是 1.3,手機是 1)
+      // getBoundingClientRect 回傳的是視覺座標 (已乘 zoom),
+      // 但 fixed 元素的 top/left 又會再被 zoom 一次 → 必須除以 zoom 抵消
+      let zoom = 1;
+      try {
+        const bz = parseFloat(getComputedStyle(document.body).zoom) || 1;
+        const hz = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+        zoom = bz * hz;
+      } catch {}
+      // 全部轉成 layout 單位
+      const lLeft = rect.left / zoom;
+      const lWidth = rect.width / zoom;
+      const lTop = rect.top / zoom;
+      const lBottom = rect.bottom / zoom;
+      const lVh = window.innerHeight / zoom;
       const PAD = 8;
-      const vh = window.innerHeight;
-      const below = vh - rect.bottom - PAD;
-      const above = rect.top - PAD;
+      const below = lVh - lBottom - PAD;
+      const above = lTop - PAD;
       // PREFERRED:取「440px」跟「視窗 70%」較小者
-      const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
+      const PREFERRED = Math.min(440, Math.floor(lVh * 0.7));
       // 因為改 position:fixed,maxH 直接夾在可用空間內,不會超出螢幕
       let dir, maxH;
       if (below >= above) { dir = "down"; maxH = Math.min(PREFERRED, Math.max(120, below)); }
       else { dir = "up"; maxH = Math.min(PREFERRED, Math.max(120, above)); }
-      setPos({ dir, maxH, left: rect.left, width: rect.width, anchorTop: rect.top, anchorBottom: rect.bottom });
+      setPos({
+        dir, maxH,
+        left: lLeft, width: lWidth,
+        topPx: lBottom + 4,
+        bottomPx: lVh - lTop + 4,
+      });
     };
     recalc();
     window.addEventListener("resize", recalc);
@@ -2668,7 +2706,7 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
             position:"fixed",left:pos.left,width:pos.width,
             background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",
             maxHeight:pos.maxH,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:1000,
-            ...(pos.dir === "down" ? { top:pos.anchorBottom + 4 } : { bottom:(window.innerHeight - pos.anchorTop) + 4 })
+            ...(pos.dir === "down" ? { top:pos.topPx } : { bottom:pos.bottomPx })
           }}>
           {fl.map(name=>(<div key={name} onClick={()=>{ if (dragRef.current.moved) return; onAdd(eventId,name);setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",cursor:"pointer",fontSize:14,borderBottom:"1px solid #f5f3ef",transition:"background .1s" }} onMouseOver={e=>e.target.style.background="#f5f3ef"} onMouseOut={e=>e.target.style.background="transparent"}>{name}</div>))}
         </div>
