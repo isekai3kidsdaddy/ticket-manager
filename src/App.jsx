@@ -318,6 +318,11 @@ function roundRect(ctx, x, y, w, h, r) {
 
 // Custom modals (confirm/prompt don't work in this env)
 function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth }) {
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape") (onDismiss || onNo || (()=>{}))(); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [onDismiss, onNo]);
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onDismiss||onNo}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"24px",width:"100%",maxWidth:maxWidth||360,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
@@ -333,6 +338,11 @@ function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth
 
 function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder }) {
   const [val, setVal] = useState(defaultValue || "");
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [onCancel]);
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onCancel}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"24px",width:"100%",maxWidth:400,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
@@ -352,6 +362,11 @@ function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder 
 function IdentityExportModal({ events, title, onClose }) {
   const [mode, setMode] = useState("text"); // text | sheet | csv
   const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [onClose]);
 
   // 收集所有實名資料 [{eventName, buyerName, identity}]
   const rows = [];
@@ -507,9 +522,12 @@ export default function App() {
   const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
 
-  // addLog 限制:只保留最近 30 筆的 snapshot,更舊的丟掉只留 msg
+  // addLog 限制:只保留最近 10 筆的 snapshot,更舊的丟掉只留 msg
   // 避免 logs 累積太大讓 localStorage 和雲端 payload 爆掉
-  const SNAPSHOT_KEEP = 30;
+  const SNAPSHOT_KEEP = 10;
+  // localStorage 寫入時更精簡:只保留最近 3 筆 snapshot
+  // (因為 localStorage 容量限制 5-10MB,比 Supabase 嚴格)
+  const LOCAL_SNAPSHOT_KEEP = 3;
   const addLog = (msg, snapshot) => setLogs(prev => {
     const id = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
     const newLog = { id, time: Date.now(), msg, snapshot };
@@ -520,6 +538,18 @@ export default function App() {
 
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
   const [syncStatus, setSyncStatus] = useState(SUPABASE_READY ? "loading" : "offline");
+  // 偵測瀏覽器是否離線(navigator.onLine)
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const lastSyncedAtRef = useRef(null);
   const initialLoadDone = useRef(false);
@@ -536,6 +566,9 @@ export default function App() {
     try { return JSON.stringify({ e: events, n: buyerNames, l: (logs||[]).slice(0,20) }); } catch { return ""; }
   };
 
+  // 「目前內容指紋」用 useMemo 快取,避免每次 render 都跑 JSON.stringify 卡頓
+  const currentSig = useMemo(() => makeSignature(events, buyerNames, logs), [events, buyerNames, logs]);
+
   // 上次成功同步時的「基準快照」,用於 3-way merge
   const baseSnapshotRef = useRef(null);
 
@@ -544,7 +577,10 @@ export default function App() {
     baseSnapshotRef.current = snapshot;
     try {
       window.localStorage?.setItem?.("tkm-v3-base", JSON.stringify(snapshot));
-    } catch {}
+    } catch {
+      // base 寫不下就算了,記憶體裡有就好
+      // (重新整理後沒有 base 時,載入邏輯會 fallback 用雲端版本當 base)
+    }
   };
 
   // 穩定的 JSON stringify:把 key 排序,避免不同來源資料 key 順序不同造成的誤判衝突
@@ -770,27 +806,53 @@ export default function App() {
 
   // 2) On change: save to localStorage immediately + debounced safe-save to Supabase
   useEffect(() => {
-    try {
-      window.localStorage?.setItem?.("tkm-v3", JSON.stringify(events));
-      window.localStorage?.setItem?.("tkm-v3-names", JSON.stringify(buyerNames));
-      window.localStorage?.setItem?.("tkm-v3-logs", JSON.stringify(logs));
-    } catch (e) {
-      // localStorage 寫入失敗(可能 quota 滿了),警告使用者一次
-      if (!storageWarnedRef.current) {
-        storageWarnedRef.current = true;
-        console.warn("localStorage 寫入失敗:", e);
-        setConfirmModal({
-          msg: "⚠️ 本機儲存空間不足!\n\n您的瀏覽器無法在本機保存最新資料。雲端同步仍然正常運作,但建議:\n\n1. 點「💾 匯出備份」存一份檔案\n2. 進「📋 紀錄」清除舊紀錄釋放空間",
-          yesLabel: "知道了",
-          onYes: () => setConfirmModal(null),
-        });
+    // localStorage 寫入策略:三層降級避免 quota 滿
+    // Level 1:正常寫入(logs 只保留最近 3 筆 snapshot)
+    // Level 2:logs 完全不含 snapshot
+    // Level 3:只寫 events 和 names,不寫 logs
+    const writeLevel1 = () => {
+      const slimLogs = (logs || []).map((l, idx) => idx < LOCAL_SNAPSHOT_KEEP ? l : (l.snapshot ? { ...l, snapshot: null } : l));
+      window.localStorage.setItem("tkm-v3", JSON.stringify(events));
+      window.localStorage.setItem("tkm-v3-names", JSON.stringify(buyerNames));
+      window.localStorage.setItem("tkm-v3-logs", JSON.stringify(slimLogs));
+    };
+    const writeLevel2 = () => {
+      const noSnap = (logs || []).map(l => l.snapshot ? { ...l, snapshot: null } : l);
+      window.localStorage.setItem("tkm-v3", JSON.stringify(events));
+      window.localStorage.setItem("tkm-v3-names", JSON.stringify(buyerNames));
+      window.localStorage.setItem("tkm-v3-logs", JSON.stringify(noSnap));
+    };
+    const writeLevel3 = () => {
+      // 最後手段:logs 完全不寫
+      try { window.localStorage.removeItem("tkm-v3-logs"); } catch {}
+      window.localStorage.setItem("tkm-v3", JSON.stringify(events));
+      window.localStorage.setItem("tkm-v3-names", JSON.stringify(buyerNames));
+    };
+    let storageOk = false;
+    try { writeLevel1(); storageOk = true; }
+    catch (e1) {
+      console.warn("localStorage Level 1 失敗,改用 Level 2:", e1);
+      try { writeLevel2(); storageOk = true; }
+      catch (e2) {
+        console.warn("localStorage Level 2 失敗,改用 Level 3:", e2);
+        try { writeLevel3(); storageOk = true; }
+        catch (e3) {
+          console.warn("localStorage 完全失敗:", e3);
+          if (!storageWarnedRef.current) {
+            storageWarnedRef.current = true;
+            setConfirmModal({
+              msg: "⚠️ 本機儲存空間不足!\n\n您的瀏覽器無法在本機保存最新資料。雲端同步仍然正常運作,但建議:\n\n1. 點「💾 匯出備份」存一份檔案\n2. 進「📋 紀錄」按「清除舊快照」釋放空間",
+              yesLabel: "知道了",
+              onYes: () => setConfirmModal(null),
+            });
+          }
+        }
       }
     }
 
     if (!SUPABASE_READY || !initialLoadDone.current) return;
 
     // 防護 1:檢查內容是否真的變了。如果指紋跟上次一樣表示是 React 重新渲染、不是真的改動。
-    const currentSig = makeSignature(events, buyerNames, logs);
     if (currentSig === lastSavedSignature.current) return; // 內容沒變不上傳
 
     // 防護 1.5:衝突彈窗開著時不要繼續上傳,避免覆蓋掉前一個彈窗
@@ -991,6 +1053,36 @@ export default function App() {
       if (timer) clearTimeout(timer);
     };
   }, [syncStatus]);
+
+  // 7) 多分頁同步:同一瀏覽器開多個分頁時,A 改了東西寫 localStorage,
+  // 透過 storage 事件通知 B 分頁立刻重新載入(不用等 30 秒 polling)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onStorage = (e) => {
+      // 只關心 tkm-v3 主資料的變動
+      if (e.key !== "tkm-v3" || !e.newValue) return;
+      // 編輯中、有衝突彈窗、最近有互動 → 不打斷
+      if (confirmModal) return;
+      if (Date.now() - lastInteractionRef.current < 30000) return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
+      try {
+        const newEvents = JSON.parse(e.newValue);
+        if (Array.isArray(newEvents)) {
+          // 直接用其他分頁寫入的版本
+          setEvents(newEvents);
+        }
+        // buyerNames / logs 也跟著拉
+        const namesStr = window.localStorage.getItem("tkm-v3-names");
+        if (namesStr) { try { const nn = JSON.parse(namesStr); if (Array.isArray(nn)) setBuyerNames(nn); } catch {} }
+        const logsStr = window.localStorage.getItem("tkm-v3-logs");
+        if (logsStr) { try { const ll = JSON.parse(logsStr); if (Array.isArray(ll)) setLogs(ll); } catch {} }
+      } catch {}
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1597,14 +1689,13 @@ export default function App() {
             <span style={{ fontSize:20,fontWeight:700,letterSpacing:1 }}>票券管家</span>
             <span style={{ fontSize:11,color:"#8b7355",fontWeight:500 }}>TICKET MANAGER</span>
             {SUPABASE_READY && (() => {
-              const currentSig = makeSignature(events, buyerNames, logs);
               const hasUnsaved = lastSavedSignature.current !== null && currentSig !== lastSavedSignature.current;
               return (
-              <button onClick={refetchFromCloud} title={lastSyncedAt?`最後同步:${new Date(lastSyncedAt).toLocaleString("zh-TW")}${hasUnsaved?"\n⚠ 目前有修改尚未上傳":""}\n點擊從雲端重新載入(會智慧合併)`:"從雲端重新載入"}
+              <button onClick={refetchFromCloud} title={!isOnline?"目前離線\n資料只存在這台裝置,連上網路會自動同步":lastSyncedAt?`最後同步:${new Date(lastSyncedAt).toLocaleString("zh-TW")}${hasUnsaved?"\n⚠ 目前有修改尚未上傳":""}\n點擊從雲端重新載入(會智慧合併)`:"從雲端重新載入"}
                 style={{ marginLeft:6,padding:"3px 9px",borderRadius:10,border:"none",cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:"inherit",
-                  background: syncStatus==="error"?"#7a3030":syncStatus==="saving"||syncStatus==="loading"?"#8b7355":hasUnsaved?"#a87830":"#3a5a3a",
+                  background: !isOnline?"#a87830":syncStatus==="error"?"#7a3030":syncStatus==="saving"||syncStatus==="loading"?"#8b7355":hasUnsaved?"#a87830":"#3a5a3a",
                   color:"#faf9f6" }}>
-                {syncStatus==="loading"?"⟳ 載入中":syncStatus==="saving"?"⟳ 同步中":syncStatus==="error"?"⚠ 同步失敗":hasUnsaved?"● 未上傳":syncStatus==="saved"?"☁ 已同步":"○ 離線"}
+                {!isOnline?"📴 離線":syncStatus==="loading"?"⟳ 載入中":syncStatus==="saving"?"⟳ 同步中":syncStatus==="error"?"⚠ 同步失敗":hasUnsaved?"● 未上傳":syncStatus==="saved"?"☁ 已同步":"○ 離線"}
               </button>
               );
             })()}
@@ -1721,9 +1812,24 @@ export default function App() {
 
             {/* 完整紀錄按日期分組 */}
             <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden" }}>
-              <div style={{ padding:"12px 18px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
+              <div style={{ padding:"12px 18px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6 }}>
                 <span style={{ fontWeight:700,fontSize:14 }}>📚 完整歷史</span>
-                {logs.length>0&&<button onClick={()=>setConfirmModal({msg:"確定要清除所有歷史紀錄嗎?\n清除後就不能再還原。",onYes:()=>{setLogs([]);setConfirmModal(null);}})} style={{ padding:"5px 12px",borderRadius:7,border:"1px solid #e8c4c4",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>清除紀錄</button>}
+                <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+                  {logs.some(l=>l.snapshot)&&<button onClick={()=>{
+                    const snapCount = logs.filter(l=>l.snapshot).length;
+                    setConfirmModal({
+                      msg:`清除舊快照可釋放本機儲存空間。\n\n目前有 ${snapCount} 筆紀錄帶有快照,清除後:\n• 異動歷史會保留(時間、訊息)\n• 但無法用「快捷還原」倒回\n\n建議先「💾 匯出備份」再操作。`,
+                      yesLabel:"清除舊快照",
+                      noLabel:"取消",
+                      onYes:()=>{
+                        setLogs(prev=>prev.map(l=>l.snapshot?{...l,snapshot:null}:l));
+                        storageWarnedRef.current=false; // 重置警告,讓下次容量警告可再彈出
+                        setConfirmModal(null);
+                      }
+                    });
+                  }} style={{ padding:"5px 12px",borderRadius:7,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b6a2d",fontFamily:"inherit" }}>🧹 清除舊快照</button>}
+                  {logs.length>0&&<button onClick={()=>setConfirmModal({msg:"確定要清除所有歷史紀錄嗎?\n清除後就不能再還原。",onYes:()=>{setLogs([]);setConfirmModal(null);}})} style={{ padding:"5px 12px",borderRadius:7,border:"1px solid #e8c4c4",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>清除紀錄</button>}
+                </div>
               </div>
               {logs.length===0?<div style={{ padding:30,textAlign:"center",color:"#bbb",fontSize:14 }}>目前沒有操作紀錄</div>:(
                 <div style={{ maxHeight:600,overflowY:"auto" }}>
