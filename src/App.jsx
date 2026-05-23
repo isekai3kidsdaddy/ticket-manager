@@ -317,9 +317,9 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // Custom modals (confirm/prompt don't work in this env)
-function ConfirmModal({ msg, onYes, onNo, yesLabel, noLabel, maxWidth }) {
+function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth }) {
   return (
-    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onNo}>
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onDismiss||onNo}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"24px",width:"100%",maxWidth:maxWidth||360,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
         <div style={{ fontSize:15, marginBottom:20, lineHeight:1.6, whiteSpace:"pre-line" }}>{msg}</div>
         <div style={{ display:"flex", gap:8, justifyContent:"flex-end",flexWrap:"wrap" }}>
@@ -530,6 +530,14 @@ export default function App() {
   // 上次成功同步時的「基準快照」,用於 3-way merge
   const baseSnapshotRef = useRef(null);
 
+  // 更新 base 同時持久化到 localStorage(避免重新整理後消失)
+  const updateBase = (snapshot) => {
+    baseSnapshotRef.current = snapshot;
+    try {
+      window.localStorage?.setItem?.("tkm-v3-base", JSON.stringify(snapshot));
+    } catch {}
+  };
+
   // 比較兩個 event 是否實質相同(用 JSON.stringify)
   const eventEqual = (a, b) => {
     if (!a && !b) return true;
@@ -604,7 +612,7 @@ export default function App() {
     return Array.from(new Set([...(myNames||[]), ...(remoteNames||[])]));
   };
 
-  // 1) On mount: load from Supabase
+  // 1) On mount: load from Supabase + 智慧合併本地未上傳的修改
   useEffect(() => {
     if (!SUPABASE_READY) { initialLoadDone.current = true; return; }
     let cancelled = false;
@@ -613,15 +621,41 @@ export default function App() {
         const res = await loadFromSupabase();
         if (cancelled) return;
         if (res && res.payload) {
-          const p = res.payload;
-          if (Array.isArray(p.events)) setEvents(p.events);
-          if (Array.isArray(p.buyerNames)) setBuyerNames(p.buyerNames);
-          if (Array.isArray(p.logs)) setLogs(p.logs);
+          const remoteP = res.payload;
+          // 讀取上次同步時記下的 base snapshot(從 localStorage)
+          let storedBase = null;
+          try {
+            const s = window.localStorage?.getItem?.("tkm-v3-base");
+            if (s) storedBase = JSON.parse(s);
+          } catch {}
+
+          // 比對本地 (events 載入自 localStorage) 跟雲端
+          const localSig = makeSignature(events, buyerNames, logs);
+          const remoteSig = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
+
+          if (localSig === remoteSig) {
+            // 本地跟雲端一樣 → 直接用雲端版本(沒未上傳修改)
+            if (Array.isArray(remoteP.events)) setEvents(remoteP.events);
+            if (Array.isArray(remoteP.buyerNames)) setBuyerNames(remoteP.buyerNames);
+            if (Array.isArray(remoteP.logs)) setLogs(remoteP.logs);
+          } else {
+            // 本地跟雲端不同 → 本地可能有未上傳的修改,用 mergeEvents 合併
+            const base = storedBase || { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
+            const mergeResult = mergeEvents(events, base.events||[], remoteP.events||[]);
+            const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames||[]);
+            const mergedLogs = mergeLogs(logs, remoteP.logs||[]);
+            setEvents(mergeResult.merged);
+            setBuyerNames(mergedNames);
+            setLogs(mergedLogs);
+            if (mergeResult.conflicts.length > 0) {
+              // 載入時就有衝突,告訴使用者
+              console.warn("載入時有衝突場次:", mergeResult.conflicts.map(c=>c.name));
+            }
+          }
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
-          lastSavedSignature.current = makeSignature(p.events||[], p.buyerNames||[], p.logs||[]);
-          // 記下「上次同步時雲端的版本」,當合併基準
-          baseSnapshotRef.current = { events: p.events||[], buyerNames: p.buyerNames||[], logs: p.logs||[] };
+          lastSavedSignature.current = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
+          updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
         }
         setSyncStatus("saved");
       } catch (e) {
@@ -632,9 +666,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
-
-  // 追蹤使用者互動——點擊、按鍵、滑動都算
+  }, []);  // 追蹤使用者互動——點擊、按鍵、滑動都算
   useEffect(() => {
     const onInteract = () => { lastInteractionRef.current = Date.now(); };
     window.addEventListener("click", onInteract);
@@ -675,7 +707,7 @@ export default function App() {
         lastSyncedAtRef.current = res.updatedAt;
         lastSavedSignature.current = currentSig;
         // 更新合併基準為「我剛上傳的版本」
-        baseSnapshotRef.current = { events, buyerNames, logs };
+        updateBase({ events, buyerNames, logs });
       } else if (res.reason === "stale" && res.remote && res.remote.payload) {
         // 衝突:雲端有更新的版本。嘗試 3-way merge
         const remoteP = res.remote.payload;
@@ -700,7 +732,7 @@ export default function App() {
             setLastSyncedAt(force.updatedAt);
             lastSyncedAtRef.current = force.updatedAt;
             lastSavedSignature.current = makeSignature(mergedEvents, mergedNames, mergedLogs);
-            baseSnapshotRef.current = { events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs };
+            updateBase({ events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs });
           } else {
             // 第二次又撞?稍後重試(下次資料變動時會自動再來)
             setSyncStatus("error");
@@ -720,6 +752,8 @@ export default function App() {
             yesLabel: "✓ 保留我的",
             noLabel: "↓ 採用對方",
             maxWidth: 460,
+            // 背景點擊只關閉彈窗,什麼都不做(資料保持本地版本,等下次同步再處理)
+            onDismiss: () => setConfirmModal(null),
             onYes: () => {
               setConfirmModal(null);
               (async () => {
@@ -733,7 +767,7 @@ export default function App() {
                   setLastSyncedAt(force.updatedAt);
                   lastSyncedAtRef.current = force.updatedAt;
                   lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, mergedLogs);
-                  baseSnapshotRef.current = { events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs };
+                  updateBase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs });
                 } else { setSyncStatus("error"); }
               })();
             },
@@ -750,7 +784,7 @@ export default function App() {
                   setLastSyncedAt(force.updatedAt);
                   lastSyncedAtRef.current = force.updatedAt;
                   lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, mergedLogs);
-                  baseSnapshotRef.current = { events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs };
+                  updateBase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs });
                 } else { setSyncStatus("error"); }
               })();
             }
@@ -789,7 +823,7 @@ export default function App() {
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
         lastSavedSignature.current = makeSignature(finalEvents, mergedNames, mergedLogs);
-        baseSnapshotRef.current = { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
+        updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
       }
       setSyncStatus("saved");
     } catch (e) {
@@ -809,6 +843,8 @@ export default function App() {
       if (saveTimer.current) return;
       // 30 秒內有互動 → 使用者正在用,不打斷
       if (Date.now() - lastInteractionRef.current < 30000) return;
+      // 衝突彈窗開著 → 不要干擾
+      if (confirmModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -817,7 +853,20 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs]);
+  }, [events, buyerNames, logs, confirmModal]);
+
+  // 6) 失敗自動重試:syncStatus 變 error 後 30 秒再試一次
+  useEffect(() => {
+    if (!SUPABASE_READY) return;
+    if (syncStatus !== "error") return;
+    const retryTimer = setTimeout(() => {
+      // 觸發 save useEffect 重試:把 signature 設為 null 強制視為「有變動」
+      lastSavedSignature.current = null;
+      // 微小變動觸發 useEffect(避免直接呼叫造成 closure 問題)
+      setLogs(prev => [...prev]);
+    }, 30000);
+    return () => clearTimeout(retryTimer);
+  }, [syncStatus]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -830,6 +879,8 @@ export default function App() {
       if (saveTimer.current) return; // 正在準備上傳,跳過這次
       // 30 秒內有互動 → 使用者正在打字/點擊,不打斷
       if (Date.now() - lastInteractionRef.current < 30000) return;
+      // 衝突彈窗開著 → 不要干擾
+      if (confirmModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -852,13 +903,13 @@ export default function App() {
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
           lastSavedSignature.current = makeSignature(mergeResult.merged, mergedNames, mergedLogs);
-          baseSnapshotRef.current = { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
+          updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
         }
         // 有衝突:讓主要的 save useEffect 在下次資料變動時處理(避免重複彈窗)
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs]);
+  }, [events, buyerNames, logs, confirmModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1372,14 +1423,18 @@ export default function App() {
           <div style={{ display:"flex",alignItems:"baseline",gap:10 }}>
             <span style={{ fontSize:20,fontWeight:700,letterSpacing:1 }}>票券管家</span>
             <span style={{ fontSize:11,color:"#8b7355",fontWeight:500 }}>TICKET MANAGER</span>
-            {SUPABASE_READY && (
-              <button onClick={refetchFromCloud} title={lastSyncedAt?`最後同步：${new Date(lastSyncedAt).toLocaleString("zh-TW")}\n點擊從雲端重新載入`:"從雲端重新載入"}
+            {SUPABASE_READY && (() => {
+              const currentSig = makeSignature(events, buyerNames, logs);
+              const hasUnsaved = lastSavedSignature.current !== null && currentSig !== lastSavedSignature.current;
+              return (
+              <button onClick={refetchFromCloud} title={lastSyncedAt?`最後同步:${new Date(lastSyncedAt).toLocaleString("zh-TW")}${hasUnsaved?"\n⚠ 目前有修改尚未上傳":""}\n點擊從雲端重新載入(會智慧合併)`:"從雲端重新載入"}
                 style={{ marginLeft:6,padding:"3px 9px",borderRadius:10,border:"none",cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:"inherit",
-                  background: syncStatus==="error"?"#7a3030":syncStatus==="saving"||syncStatus==="loading"?"#8b7355":"#3a5a3a",
+                  background: syncStatus==="error"?"#7a3030":syncStatus==="saving"||syncStatus==="loading"?"#8b7355":hasUnsaved?"#a87830":"#3a5a3a",
                   color:"#faf9f6" }}>
-                {syncStatus==="loading"?"⟳ 載入中":syncStatus==="saving"?"⟳ 同步中":syncStatus==="saved"?"☁ 已同步":syncStatus==="error"?"⚠ 同步失敗":"○ 離線"}
+                {syncStatus==="loading"?"⟳ 載入中":syncStatus==="saving"?"⟳ 同步中":syncStatus==="error"?"⚠ 同步失敗":hasUnsaved?"● 未上傳":syncStatus==="saved"?"☁ 已同步":"○ 離線"}
               </button>
-            )}
+              );
+            })()}
             {!SUPABASE_READY && (
               <span title="尚未設定雲端，資料只存本機" style={{ marginLeft:6,padding:"3px 9px",borderRadius:10,fontSize:10,fontWeight:700,background:"#555",color:"#bbb" }}>○ 本機</span>
             )}
@@ -1996,7 +2051,7 @@ export default function App() {
         </div>
       </div>)}
 
-      {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={confirmModal.onNo||(()=>setConfirmModal(null))} yesLabel={confirmModal.yesLabel} noLabel={confirmModal.noLabel} maxWidth={confirmModal.maxWidth}/>}
+      {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={confirmModal.onNo||(()=>setConfirmModal(null))} onDismiss={confirmModal.onDismiss||confirmModal.onNo||(()=>setConfirmModal(null))} yesLabel={confirmModal.yesLabel} noLabel={confirmModal.noLabel} maxWidth={confirmModal.maxWidth}/>}
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
     </div>
