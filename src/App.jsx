@@ -562,15 +562,31 @@ export default function App() {
   const IDLE_MS = 5 * 60 * 1000; // 5 分鐘
 
   // 把 events/buyerNames/logs 變成一個字串指紋(用 JSON.stringify 簡單夠用)
+  // 注意:logs 的 snapshot 欄位在計算指紋時要被剝掉,
+  // 因為雲端為了省空間只保留前 CLOUD_SNAPSHOT_KEEP 筆 snapshot,
+  // 本地 React state 可能保留更多 → snapshot 不同會讓 sig 永遠不符 → 一直誤判要重新上傳
   const makeSignature = (events, buyerNames, logs) => {
-    try { return JSON.stringify({ e: events, n: buyerNames, l: (logs||[]).slice(0,20) }); } catch { return ""; }
+    try {
+      const slimLogs = (logs||[]).slice(0,20).map(l => l && l.snapshot ? { ...l, snapshot: null } : l);
+      return JSON.stringify({ e: events, n: buyerNames, l: slimLogs });
+    } catch { return ""; }
   };
+
+  // 雲端 snapshot 上限:只保留最近 3 筆有 snapshot 的紀錄,避免 payload 接近 Supabase JSONB 限制
+  const CLOUD_SNAPSHOT_KEEP = 3;
+  const slimLogsForCloud = (logs) =>
+    (logs || []).map((l, idx) => idx < CLOUD_SNAPSHOT_KEEP ? l : (l && l.snapshot ? { ...l, snapshot: null } : l));
 
   // 「目前內容指紋」用 useMemo 快取,避免每次 render 都跑 JSON.stringify 卡頓
   const currentSig = useMemo(() => makeSignature(events, buyerNames, logs), [events, buyerNames, logs]);
 
   // 上次成功同步時的「基準快照」,用於 3-way merge
   const baseSnapshotRef = useRef(null);
+  // 「使用者放棄處理的衝突指紋」——按背景關掉衝突彈窗時記下當下 sig,
+  // 在資料下次變動 (sig 改變) 之前不再自動重觸發 save,避免無窮彈窗
+  const dismissedConflictSig = useRef(null);
+  // 「目前正在送出的上傳」標記——避免 polling/refetch 跟 in-flight save 撞車造成 race
+  const savingInFlightRef = useRef(false);
 
   // 更新 base 同時持久化到 localStorage(避免重新整理後消失)
   const updateBase = (snapshot) => {
@@ -740,6 +756,16 @@ export default function App() {
   // 1) On mount: load from Supabase + 智慧合併本地未上傳的修改
   useEffect(() => {
     if (!SUPABASE_READY) { initialLoadDone.current = true; return; }
+
+    // 同步偵測:這台是不是「真.新裝置」(localStorage 從未存過 tkm-v3)
+    // 必須在 await 之前做,否則 save useEffect 會搶先把 INITIAL_EVENTS 寫進 localStorage,
+    // 之後就分不出到底是新裝置還是被清空過。
+    let isFreshDevice = false;
+    try {
+      const raw = window.localStorage?.getItem?.("tkm-v3");
+      if (!raw) isFreshDevice = true;
+    } catch { isFreshDevice = true; }
+
     let cancelled = false;
     (async () => {
       try {
@@ -754,27 +780,41 @@ export default function App() {
             if (s) storedBase = JSON.parse(s);
           } catch {}
 
-          // 比對本地 (events 載入自 localStorage) 跟雲端
-          const localSig = makeSignature(events, buyerNames, logs);
-          const remoteSig = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
-
-          if (localSig === remoteSig) {
-            // 本地跟雲端一樣 → 直接用雲端版本(沒未上傳修改)
+          if (isFreshDevice) {
+            // ── 真.新裝置 ──
+            // 本地 events 是寫死的 INITIAL_EVENTS,完全不是「使用者的修改」。
+            // 如果走 merge 邏輯,INITIAL_EVENTS 會被當成「我的新編輯」覆蓋雲端 → 災難。
+            // 因此直接吃雲端版本,不做任何合併。
             if (Array.isArray(remoteP.events)) setEvents(remoteP.events);
             if (Array.isArray(remoteP.buyerNames)) setBuyerNames(remoteP.buyerNames);
             if (Array.isArray(remoteP.logs)) setLogs(remoteP.logs);
           } else {
-            // 本地跟雲端不同 → 本地可能有未上傳的修改,用 mergeEvents 合併
-            const base = storedBase || { events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] };
-            const mergeResult = mergeEvents(events, base.events||[], remoteP.events||[]);
-            const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames||[]);
-            const mergedLogs = mergeLogs(logs, remoteP.logs||[]);
-            setEvents(mergeResult.merged);
-            setBuyerNames(mergedNames);
-            setLogs(mergedLogs);
-            if (mergeResult.conflicts.length > 0) {
-              // 載入時就有衝突,告訴使用者
-              console.warn("載入時有衝突場次:", mergeResult.conflicts.map(c=>c.name));
+            // ── 本地原本就有資料 ──
+            // 比對本地跟雲端 sig
+            const localSig = makeSignature(events, buyerNames, logs);
+            const remoteSig = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
+
+            if (localSig === remoteSig) {
+              // 完全一樣 → 直接用雲端版本
+              if (Array.isArray(remoteP.events)) setEvents(remoteP.events);
+              if (Array.isArray(remoteP.buyerNames)) setBuyerNames(remoteP.buyerNames);
+              if (Array.isArray(remoteP.logs)) setLogs(remoteP.logs);
+            } else {
+              // 本地跟雲端不同 → 本地可能有未上傳的修改,用 mergeEvents 合併。
+              // 注意:storedBase 缺失時 fallback 用「本地」當 base,
+              // 而不是用「雲端」當 base(那會讓本地版本被誤判成「我的新編輯」 → 覆蓋雲端)。
+              // 用本地當 base 的代價是雲端的修改一律會被當成「對方改了」勝出,
+              // 比起回朔風險,這是可以接受的退讓。
+              const base = storedBase || { events, buyerNames, logs };
+              const mergeResult = mergeEvents(events, base.events||[], remoteP.events||[]);
+              const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames||[]);
+              const mergedLogs = mergeLogs(logs, remoteP.logs||[]);
+              setEvents(mergeResult.merged);
+              setBuyerNames(mergedNames);
+              setLogs(mergedLogs);
+              if (mergeResult.conflicts.length > 0) {
+                console.warn("載入時有衝突場次:", mergeResult.conflicts.map(c=>c.name));
+              }
             }
           }
           setLastSyncedAt(res.updatedAt);
@@ -855,6 +895,10 @@ export default function App() {
     // 防護 1:檢查內容是否真的變了。如果指紋跟上次一樣表示是 React 重新渲染、不是真的改動。
     if (currentSig === lastSavedSignature.current) return; // 內容沒變不上傳
 
+    // 防護 1.4:使用者剛剛點背景關掉了衝突彈窗 → 在資料下次真的變動前不重觸發
+    // (一旦 currentSig 變了,自然就 !== dismissedConflictSig,會自動恢復)
+    if (dismissedConflictSig.current === currentSig) return;
+
     // 防護 1.5:衝突彈窗開著時不要繼續上傳,避免覆蓋掉前一個彈窗
     // (彈窗被覆蓋的話前一個衝突狀態會丟失)
     if (confirmModal) {
@@ -870,7 +914,9 @@ export default function App() {
     setSyncStatus("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const res = await saveToSupabase({ events, buyerNames, logs }, lastSyncedAtRef.current);
+      savingInFlightRef.current = true;
+      try {
+      const res = await saveToSupabase({ events, buyerNames, logs: slimLogsForCloud(logs) }, lastSyncedAtRef.current);
       if (res.ok) {
         setSyncStatus("saved");
         setLastSyncedAt(res.updatedAt);
@@ -882,7 +928,8 @@ export default function App() {
         // 衝突:雲端有更新的版本。嘗試 3-way merge
         const remoteP = res.remote.payload;
         const remoteTs = res.remote.updatedAt;
-        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+        // base 缺失時 fallback 用「本地」而非空陣列,避免空 base 造成的偽衝突
+        const base = baseSnapshotRef.current || { events, buyerNames, logs };
 
         const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
         const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
@@ -896,7 +943,7 @@ export default function App() {
           setLogs(mergedLogs);
           setSyncStatus("saving");
           // 上傳合併後版本(用 remoteTs 當基準,確保不會再撞)
-          const force = await saveToSupabase({ events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs }, remoteTs);
+          const force = await saveToSupabase({ events: mergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, remoteTs);
           if (force.ok) {
             setSyncStatus("saved");
             setLastSyncedAt(force.updatedAt);
@@ -922,40 +969,51 @@ export default function App() {
             yesLabel: "✓ 保留我的",
             noLabel: "↓ 採用對方",
             maxWidth: 460,
-            // 背景點擊只關閉彈窗,什麼都不做(資料保持本地版本,等下次同步再處理)
-            onDismiss: () => setConfirmModal(null),
+            // 背景點擊:記下當下 sig,在資料下次變動前不再重觸發(避免無窮彈窗)
+            onDismiss: () => {
+              dismissedConflictSig.current = currentSig;
+              setConfirmModal(null);
+            },
             onYes: () => {
+              dismissedConflictSig.current = null;
               setConfirmModal(null);
               (async () => {
-                setSyncStatus("saving");
-                setEvents(safeMergedEvents);
-                setBuyerNames(mergedNames);
-                setLogs(mergedLogs);
-                const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs }, null, { force: true });
-                if (force.ok) {
-                  setSyncStatus("saved");
-                  setLastSyncedAt(force.updatedAt);
-                  lastSyncedAtRef.current = force.updatedAt;
-                  lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, mergedLogs);
-                  updateBase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs });
-                } else { setSyncStatus("error"); }
+                savingInFlightRef.current = true;
+                try {
+                  setSyncStatus("saving");
+                  setEvents(safeMergedEvents);
+                  setBuyerNames(mergedNames);
+                  setLogs(mergedLogs);
+                  const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, null, { force: true });
+                  if (force.ok) {
+                    setSyncStatus("saved");
+                    setLastSyncedAt(force.updatedAt);
+                    lastSyncedAtRef.current = force.updatedAt;
+                    lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, mergedLogs);
+                    updateBase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs });
+                  } else { setSyncStatus("error"); }
+                } finally { savingInFlightRef.current = false; }
               })();
             },
             onNo: () => {
+              dismissedConflictSig.current = null;
               setConfirmModal(null);
               (async () => {
-                setSyncStatus("saving");
-                setEvents(otherChoiceEvents);
-                setBuyerNames(mergedNames);
-                setLogs(mergedLogs);
-                const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs }, null, { force: true });
-                if (force.ok) {
-                  setSyncStatus("saved");
-                  setLastSyncedAt(force.updatedAt);
-                  lastSyncedAtRef.current = force.updatedAt;
-                  lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, mergedLogs);
-                  updateBase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs });
-                } else { setSyncStatus("error"); }
+                savingInFlightRef.current = true;
+                try {
+                  setSyncStatus("saving");
+                  setEvents(otherChoiceEvents);
+                  setBuyerNames(mergedNames);
+                  setLogs(mergedLogs);
+                  const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, null, { force: true });
+                  if (force.ok) {
+                    setSyncStatus("saved");
+                    setLastSyncedAt(force.updatedAt);
+                    lastSyncedAtRef.current = force.updatedAt;
+                    lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, mergedLogs);
+                    updateBase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs });
+                  } else { setSyncStatus("error"); }
+                } finally { savingInFlightRef.current = false; }
               })();
             }
           });
@@ -963,12 +1021,14 @@ export default function App() {
       } else {
         setSyncStatus("error");
       }
+      } finally { savingInFlightRef.current = false; }
     }, 800);
   }, [events, buyerNames, logs, confirmModal]);
 
   // 安全 refetch:用 mergeEvents 智慧合併,保留本地未上傳的修改
   const refetchFromCloud = async () => {
     if (!SUPABASE_READY) return;
+    if (savingInFlightRef.current) return; // 正在上傳中,不打擾
     setSyncStatus("loading");
     // 5 秒 timeout 保護,避免 syncStatus 卡住
     const safetyTimer = setTimeout(() => {
@@ -980,7 +1040,8 @@ export default function App() {
       if (res && res.payload) {
         const remoteP = res.payload;
         // 用 mergeEvents 合併,而不是直接覆蓋
-        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+        // base 缺失時 fallback 用本地 (而不是空陣列),避免空 base 造成偽衝突
+        const base = baseSnapshotRef.current || { events, buyerNames, logs };
         const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
         const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
         const mergedLogs = mergeLogs(logs, remoteP.logs || []);
@@ -1013,6 +1074,8 @@ export default function App() {
       if (!initialLoadDone.current) return;
       // 正在準備上傳(有 pending changes) → 不要 refetch 覆蓋
       if (saveTimer.current) return;
+      // 正在 in-flight 上傳 → 不要打斷
+      if (savingInFlightRef.current) return;
       // 30 秒內有互動 → 使用者正在用,不打斷
       if (Date.now() - lastInteractionRef.current < 30000) return;
       // 衝突彈窗開著 → 不要干擾
@@ -1061,8 +1124,9 @@ export default function App() {
     const onStorage = (e) => {
       // 只關心 tkm-v3 主資料的變動
       if (e.key !== "tkm-v3" || !e.newValue) return;
-      // 編輯中、有衝突彈窗、最近有互動 → 不打斷
+      // 編輯中、有衝突彈窗、in-flight 上傳、最近有互動 → 不打斷
       if (confirmModal) return;
+      if (saveTimer.current || savingInFlightRef.current) return;
       if (Date.now() - lastInteractionRef.current < 30000) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
@@ -1093,6 +1157,7 @@ export default function App() {
       if (!initialLoadDone.current) return;
       if (document.visibilityState !== "visible") return; // 背景中不 poll
       if (saveTimer.current) return; // 正在準備上傳,跳過這次
+      if (savingInFlightRef.current) return; // in-flight 上傳中,跳過這次
       // 30 秒內有互動 → 使用者正在打字/點擊,不打斷
       if (Date.now() - lastInteractionRef.current < 30000) return;
       // 衝突彈窗開著 → 不要干擾
@@ -1109,7 +1174,8 @@ export default function App() {
         if (res.updatedAt === lastSyncedAtRef.current) return;
 
         const remoteP = res.payload;
-        const base = baseSnapshotRef.current || { events: [], buyerNames: [], logs: [] };
+        // base 缺失時 fallback 用本地,避免空 base 造成偽衝突
+        const base = baseSnapshotRef.current || { events, buyerNames, logs };
         // 自動合併:把雲端新內容跟本地未上傳的修改合併
         const mergeResult = mergeEvents(events, base.events, remoteP.events || []);
         const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames || []);
@@ -1370,15 +1436,18 @@ export default function App() {
         // 還原後立刻強制上傳,避免被 polling 覆蓋
         if (SUPABASE_READY) {
           (async () => {
-            setSyncStatus("saving");
-            const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs }, null, { force: true });
-            if (force.ok) {
-              setSyncStatus("saved");
-              setLastSyncedAt(force.updatedAt);
-              lastSyncedAtRef.current = force.updatedAt;
-              lastSavedSignature.current = makeSignature(log.snapshot, buyerNames, logs);
-              updateBase({ events: log.snapshot, buyerNames, logs });
-            } else { setSyncStatus("error"); }
+            savingInFlightRef.current = true;
+            try {
+              setSyncStatus("saving");
+              const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs: slimLogsForCloud(logs) }, null, { force: true });
+              if (force.ok) {
+                setSyncStatus("saved");
+                setLastSyncedAt(force.updatedAt);
+                lastSyncedAtRef.current = force.updatedAt;
+                lastSavedSignature.current = makeSignature(log.snapshot, buyerNames, logs);
+                updateBase({ events: log.snapshot, buyerNames, logs });
+              } else { setSyncStatus("error"); }
+            } finally { savingInFlightRef.current = false; }
           })();
         }
       }
@@ -1427,27 +1496,24 @@ export default function App() {
             // 匯入後立刻強制上傳到雲端,避免被 polling 覆蓋
             if (SUPABASE_READY) {
               (async () => {
-                setSyncStatus("saving");
-                const force = await saveToSupabase({
-                  events: data.events,
-                  buyerNames: Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
-                  logs: Array.isArray(data.logs) ? data.logs : logs,
-                }, null, { force: true });
-                if (force.ok) {
-                  setSyncStatus("saved");
-                  setLastSyncedAt(force.updatedAt);
-                  lastSyncedAtRef.current = force.updatedAt;
-                  lastSavedSignature.current = makeSignature(
-                    data.events,
-                    Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
-                    Array.isArray(data.logs) ? data.logs : logs
-                  );
-                  updateBase({
+                savingInFlightRef.current = true;
+                try {
+                  setSyncStatus("saving");
+                  const importedLogs = Array.isArray(data.logs) ? data.logs : logs;
+                  const importedNames = Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames;
+                  const force = await saveToSupabase({
                     events: data.events,
-                    buyerNames: Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
-                    logs: Array.isArray(data.logs) ? data.logs : logs,
-                  });
-                } else { setSyncStatus("error"); }
+                    buyerNames: importedNames,
+                    logs: slimLogsForCloud(importedLogs),
+                  }, null, { force: true });
+                  if (force.ok) {
+                    setSyncStatus("saved");
+                    setLastSyncedAt(force.updatedAt);
+                    lastSyncedAtRef.current = force.updatedAt;
+                    lastSavedSignature.current = makeSignature(data.events, importedNames, importedLogs);
+                    updateBase({ events: data.events, buyerNames: importedNames, logs: importedLogs });
+                  } else { setSyncStatus("error"); }
+                } finally { savingInFlightRef.current = false; }
               })();
             }
           }
