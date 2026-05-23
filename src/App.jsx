@@ -507,7 +507,15 @@ export default function App() {
   const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
 
-  const addLog = (msg, snapshot) => setLogs(prev => [{ id: Date.now(), time: Date.now(), msg, snapshot }, ...prev].slice(0, 500));
+  // addLog 限制:只保留最近 30 筆的 snapshot,更舊的丟掉只留 msg
+  // 避免 logs 累積太大讓 localStorage 和雲端 payload 爆掉
+  const SNAPSHOT_KEEP = 30;
+  const addLog = (msg, snapshot) => setLogs(prev => {
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+    const newLog = { id, time: Date.now(), msg, snapshot };
+    const arr = [newLog, ...prev].slice(0, 500);
+    return arr.map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
+  });
   const snap = () => JSON.parse(JSON.stringify(events));
 
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
@@ -520,6 +528,7 @@ export default function App() {
   const lastSavedSignature = useRef(null);
   // 「使用者是否最近有互動」——閒置 5 分鐘以上的視窗不會主動上傳
   const lastInteractionRef = useRef(Date.now());
+  const storageWarnedRef = useRef(false);
   const IDLE_MS = 5 * 60 * 1000; // 5 分鐘
 
   // 把 events/buyerNames/logs 變成一個字串指紋(用 JSON.stringify 簡單夠用)
@@ -538,11 +547,66 @@ export default function App() {
     } catch {}
   };
 
-  // 比較兩個 event 是否實質相同(用 JSON.stringify)
+  // 穩定的 JSON stringify:把 key 排序,避免不同來源資料 key 順序不同造成的誤判衝突
+  const stableStringify = (obj) => {
+    if (obj === null || obj === undefined) return JSON.stringify(obj);
+    if (typeof obj !== "object") return JSON.stringify(obj);
+    if (Array.isArray(obj)) return "[" + obj.map(stableStringify).join(",") + "]";
+    const keys = Object.keys(obj).sort();
+    return "{" + keys.map(k => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",") + "}";
+  };
+
+  // 比較兩個 event 是否實質相同(用 stable stringify,避免 key 順序差異)
   const eventEqual = (a, b) => {
     if (!a && !b) return true;
     if (!a || !b) return false;
-    try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+    try { return stableStringify(a) === stableStringify(b); } catch { return false; }
+  };
+
+  // 用 stable stringify 比對兩個 buyer 是否相同(忽略 key 順序)
+  const buyerEqual = (a, b) => {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    try { return stableStringify(a) === stableStringify(b); } catch { return false; }
+  };
+
+  // buyer-level 3-way merge:兩台改同場次的不同訂購人 → 自動合併
+  // 回傳 { mergedBuyers, hasConflict } - hasConflict=true 表示 buyer 本身有衝突無法自動合併
+  const mergeBuyers = (myBuyers, baseBuyers, remoteBuyers) => {
+    const baseByName = new Map((baseBuyers||[]).map(b => [b.name, b]));
+    const myByName = new Map((myBuyers||[]).map(b => [b.name, b]));
+    const remoteByName = new Map((remoteBuyers||[]).map(b => [b.name, b]));
+    const allNames = new Set([...myByName.keys(), ...remoteByName.keys(), ...baseByName.keys()]);
+    const merged = [];
+    let hasConflict = false;
+
+    for (const name of allNames) {
+      const my = myByName.get(name);
+      const base = baseByName.get(name);
+      const remote = remoteByName.get(name);
+
+      if (!my && !remote) continue;
+      if (my && !remote) {
+        if (!base) { merged.push(my); continue; } // 我新增
+        if (buyerEqual(my, base)) continue; // 對方刪除,我沒改
+        hasConflict = true; merged.push(my); continue;
+      }
+      if (!my && remote) {
+        if (!base) { merged.push(remote); continue; } // 對方新增
+        if (buyerEqual(remote, base)) continue; // 我刪除,對方沒改
+        hasConflict = true; merged.push(remote); continue;
+      }
+      const myChanged = !buyerEqual(my, base);
+      const remoteChanged = !buyerEqual(remote, base);
+      if (!myChanged && !remoteChanged) { merged.push(my); continue; }
+      if (myChanged && !remoteChanged) { merged.push(my); continue; }
+      if (!myChanged && remoteChanged) { merged.push(remote); continue; }
+      if (buyerEqual(my, remote)) { merged.push(my); continue; }
+      // 同一訂購人雙方都改 → 真衝突
+      hasConflict = true;
+      merged.push(my); // 保留我的
+    }
+    return { mergedBuyers: merged, hasConflict };
   };
 
   // 3-way merge:合併本地、雲端、基準三方版本
@@ -590,21 +654,46 @@ export default function App() {
       if (myChanged && !remoteChanged) { merged.push(my); continue; } // 只有我改
       if (!myChanged && remoteChanged) { merged.push(remote); continue; } // 只有對方改
       if (eventEqual(my, remote)) { merged.push(my); continue; } // 雙方改成一樣
-      // 真衝突
+
+      // 雙方都改同場次 → 試 buyer-level 合併
+      // 比對非 buyers 的欄位是否相同(name/price/status)
+      const stripBuyers = (e) => { const x = {...e}; delete x.buyers; return x; };
+      const myMeta = stripBuyers(my);
+      const baseMeta = base ? stripBuyers(base) : null;
+      const remoteMeta = stripBuyers(remote);
+      const metaConflict = baseMeta && !buyerEqual(myMeta, baseMeta) && !buyerEqual(remoteMeta, baseMeta) && !buyerEqual(myMeta, remoteMeta);
+
+      if (!metaConflict) {
+        // 場次本身(名稱/價格/狀態)沒衝突 → 試 buyer-level 合併
+        const { mergedBuyers, hasConflict } = mergeBuyers(my.buyers||[], base?.buyers||[], remote.buyers||[]);
+        if (!hasConflict) {
+          // buyer 也沒衝突 → 自動合併成功!
+          const mergedEvent = { ...my };
+          // meta 用「有改的那邊」
+          if (baseMeta && !buyerEqual(myMeta, baseMeta)) Object.assign(mergedEvent, myMeta);
+          else if (baseMeta && !buyerEqual(remoteMeta, baseMeta)) Object.assign(mergedEvent, remoteMeta);
+          mergedEvent.buyers = mergedBuyers;
+          merged.push(mergedEvent);
+          continue;
+        }
+      }
+
+      // 真衝突(meta 衝突或 buyer 衝突無法合併)
       conflicts.push({ id, name: my.name, my, remote });
       merged.push(my); // 預設先用我的
     }
     return { merged, conflicts };
   };
 
-  // 合併 logs:聯集 + 按時間排序 + 去重 + 截前 500
+  // 合併 logs:聯集 + 按時間排序 + 去重 + 截前 500 + 只保留最近 30 筆 snapshot
   const mergeLogs = (myLogs, remoteLogs) => {
     const seen = new Set();
     const all = [];
-    for (const l of (myLogs||[])) { const k = `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
-    for (const l of (remoteLogs||[])) { const k = `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
+    for (const l of (myLogs||[])) { const k = l.id ? `id:${l.id}` : `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
+    for (const l of (remoteLogs||[])) { const k = l.id ? `id:${l.id}` : `${l.time}_${l.msg}`; if (!seen.has(k)) { seen.add(k); all.push(l); } }
     all.sort((a, b) => b.time - a.time);
-    return all.slice(0, 500);
+    // 截前 500 + 只保留最近 30 筆 snapshot(避免合併後 payload 爆掉)
+    return all.slice(0, 500).map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
   };
 
   // 合併 buyerNames:聯集去重
@@ -685,7 +774,18 @@ export default function App() {
       window.localStorage?.setItem?.("tkm-v3", JSON.stringify(events));
       window.localStorage?.setItem?.("tkm-v3-names", JSON.stringify(buyerNames));
       window.localStorage?.setItem?.("tkm-v3-logs", JSON.stringify(logs));
-    } catch {}
+    } catch (e) {
+      // localStorage 寫入失敗(可能 quota 滿了),警告使用者一次
+      if (!storageWarnedRef.current) {
+        storageWarnedRef.current = true;
+        console.warn("localStorage 寫入失敗:", e);
+        setConfirmModal({
+          msg: "⚠️ 本機儲存空間不足!\n\n您的瀏覽器無法在本機保存最新資料。雲端同步仍然正常運作,但建議:\n\n1. 點「💾 匯出備份」存一份檔案\n2. 進「📋 紀錄」清除舊紀錄釋放空間",
+          yesLabel: "知道了",
+          onYes: () => setConfirmModal(null),
+        });
+      }
+    }
 
     if (!SUPABASE_READY || !initialLoadDone.current) return;
 
@@ -822,7 +922,9 @@ export default function App() {
         setLogs(mergedLogs);
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
-        lastSavedSignature.current = makeSignature(finalEvents, mergedNames, mergedLogs);
+        // 「上次同步的版本」記成雲端的版本(不是合併後),
+        // 這樣若合併進了本地修改,sig 會跟雲端不同 → 之後 save useEffect 會自動上傳
+        lastSavedSignature.current = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
         updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
       }
       setSyncStatus("saved");
@@ -845,6 +947,11 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < 30000) return;
       // 衝突彈窗開著 → 不要干擾
       if (confirmModal) return;
+      // 使用者正在編輯輸入框 → 不要打斷
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -853,19 +960,28 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
 
-  // 6) 失敗自動重試:syncStatus 變 error 後 30 秒再試一次
+  // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
     if (!SUPABASE_READY) return;
     if (syncStatus !== "error") return;
-    const retryTimer = setTimeout(() => {
+    let cancelled = false;
+    let timer = null;
+    const tryRetry = () => {
+      if (cancelled) return;
       // 觸發 save useEffect 重試:把 signature 設為 null 強制視為「有變動」
       lastSavedSignature.current = null;
-      // 微小變動觸發 useEffect(避免直接呼叫造成 closure 問題)
-      setLogs(prev => [...prev]);
-    }, 30000);
-    return () => clearTimeout(retryTimer);
+      setLogs(prev => [...prev]); // 微小變動觸發 useEffect
+      // 30 秒後若還是 error,再試一次(以新的 useEffect 啟動)
+      // 注意:syncStatus 若已恢復 saved/saving,cleanup 會清掉這個 timer
+      timer = setTimeout(tryRetry, 30000);
+    };
+    timer = setTimeout(tryRetry, 30000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [syncStatus]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
@@ -881,6 +997,10 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < 30000) return;
       // 衝突彈窗開著 → 不要干擾
       if (confirmModal) return;
+      // 編輯中(input/textarea focus 或 editing state) → 不打斷
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -902,14 +1022,15 @@ export default function App() {
           setLogs(mergedLogs);
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
-          lastSavedSignature.current = makeSignature(mergeResult.merged, mergedNames, mergedLogs);
+          // sig 記成雲端版本(不是合併後),這樣本地修改會被視為「未上傳」自動觸發 save
+          lastSavedSignature.current = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
           updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
         }
         // 有衝突:讓主要的 save useEffect 在下次資料變動時處理(避免重複彈窗)
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1039,7 +1160,7 @@ export default function App() {
     addLog(`【${evt.name}】${b.name}:新增一筆實名資料`, snap());
     updateEvent(eventId, e => {
       const list = Array.isArray(e.buyers[idx].identities) ? [...e.buyers[idx].identities] : [];
-      list.push({ id: Date.now()+Math.random(), name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+      list.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
       e.buyers[idx] = { ...e.buyers[idx], identities: list, needRealName: true };
       return e;
     });
@@ -1142,7 +1263,25 @@ export default function App() {
     const ts = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
     setConfirmModal({
       msg: `即將還原到 ${ts}「${log.msg}」之前的版本。\n\n⚠ 之後的 ${newerCount} 筆異動會消失!\n\n👉 強烈建議先點「💾 匯出備份」存一份再還原,以防萬一。\n\n要繼續嗎?`,
-      onYes: () => { addLog(`⟲ 還原到 ${ts}`, snap()); setEvents(log.snapshot); setConfirmModal(null); }
+      onYes: () => {
+        addLog(`⟲ 還原到 ${ts}`, snap());
+        setEvents(log.snapshot);
+        setConfirmModal(null);
+        // 還原後立刻強制上傳,避免被 polling 覆蓋
+        if (SUPABASE_READY) {
+          (async () => {
+            setSyncStatus("saving");
+            const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs }, null);
+            if (force.ok) {
+              setSyncStatus("saved");
+              setLastSyncedAt(force.updatedAt);
+              lastSyncedAtRef.current = force.updatedAt;
+              lastSavedSignature.current = makeSignature(log.snapshot, buyerNames, logs);
+              updateBase({ events: log.snapshot, buyerNames, logs });
+            } else { setSyncStatus("error"); }
+          })();
+        }
+      }
     });
   };
 
@@ -1185,6 +1324,32 @@ export default function App() {
             if (Array.isArray(data.buyerNames)) setBuyerNames(data.buyerNames);
             if (Array.isArray(data.logs)) setLogs(data.logs);
             setConfirmModal(null);
+            // 匯入後立刻強制上傳到雲端,避免被 polling 覆蓋
+            if (SUPABASE_READY) {
+              (async () => {
+                setSyncStatus("saving");
+                const force = await saveToSupabase({
+                  events: data.events,
+                  buyerNames: Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
+                  logs: Array.isArray(data.logs) ? data.logs : logs,
+                }, null);
+                if (force.ok) {
+                  setSyncStatus("saved");
+                  setLastSyncedAt(force.updatedAt);
+                  lastSyncedAtRef.current = force.updatedAt;
+                  lastSavedSignature.current = makeSignature(
+                    data.events,
+                    Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
+                    Array.isArray(data.logs) ? data.logs : logs
+                  );
+                  updateBase({
+                    events: data.events,
+                    buyerNames: Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
+                    logs: Array.isArray(data.logs) ? data.logs : logs,
+                  });
+                } else { setSyncStatus("error"); }
+              })();
+            }
           }
         });
       } catch (err) {
