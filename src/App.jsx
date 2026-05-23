@@ -359,6 +359,158 @@ function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder 
   );
 }
 
+// 訂購人輸出 Modal:把訂購人清單轉成 LINE 文字 / Excel / CSV
+function BuyerExportModal({ buyers, title, onClose }) {
+  const [mode, setMode] = useState("text"); // text | sheet | csv
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [onClose]);
+
+  const totalBuyers = buyers.length;
+  const totalOrders = buyers.reduce((s, b) => s + b.orders.length, 0);
+  const totalQty = buyers.reduce((s, b) => s + b.totalQty, 0);
+
+  // 從 batches 推算這筆訂單的「主要狀態」
+  const orderStatusLabel = (o) => {
+    if (!o.batches || o.batches.length === 0) return "";
+    const order = ["unpaid","refund","picked","refunded","normal"];
+    for (const st of order) {
+      const hit = o.batches.filter(x => x.st === st);
+      if (hit.length > 0) {
+        const qty = hit.reduce((s, x) => s + (x.qty || 0), 0);
+        const label = st === "unpaid" ? "未付款" : st === "refund" ? "待退費" : st === "picked" ? "已取票" : st === "refunded" ? "已退款" : "";
+        if (label) return `${qty}張${label}`;
+      }
+    }
+    return "";
+  };
+  const evtStatusLabel = (s) => s === "done" ? "已完成" : s === "picked" ? "已取票" : "進行中";
+
+  // 文字格式(給 LINE,依訂購人分群)
+  const textOutput = (() => {
+    const lines = [];
+    lines.push(`📊 訂購人總覽 (${totalBuyers} 人 · ${totalQty} 張)`);
+    lines.push("");
+    buyers.forEach(b => {
+      const tags = [];
+      if (b.unpaidQty > 0) tags.push(`未付${b.unpaidQty}張`);
+      if (b.refundCount > 0) tags.push(`待退${b.refundCount}筆`);
+      if (b.refundedCount > 0) tags.push(`已退${b.refundedCount}筆`);
+      if (b.pickedQty > 0) tags.push(`已取${b.pickedQty}張`);
+      const tagStr = tags.length > 0 ? ` [${tags.join(" / ")}]` : "";
+      lines.push(`👤 ${b.name} — ${b.totalQty} 張 · ${b.orders.length} 場${tagStr}`);
+      b.orders.forEach(o => {
+        const extras = [];
+        const ost = orderStatusLabel(o);
+        if (ost) extras.push(ost);
+        if (o.note) extras.push(o.note);
+        const extraStr = extras.length > 0 ? ` (${extras.join(" · ")})` : "";
+        const sl = evtStatusLabel(o.eventStatus);
+        lines.push(`   • ${o.eventName} × ${o.qty}張 [${sl}]${extraStr}`);
+      });
+      lines.push("");
+    });
+    return lines.join("\n").trim();
+  })();
+
+  // Excel/Sheet 跟 CSV 用 per-order rows
+  const headers = ["訂購人","場次","場次狀態","票價","張數","批次明細","備註"];
+  const buildRows = () => {
+    const rows = [];
+    buyers.forEach(b => {
+      b.orders.forEach(o => {
+        const batchStr = (o.batches || []).map(bt => {
+          const lbl = bt.st === "unpaid" ? "未付款" : bt.st === "refund" ? "待退費" : bt.st === "picked" ? "已取票" : bt.st === "refunded" ? "已退款" : "正常";
+          return `${bt.qty}張${lbl}${bt.detail?`(${bt.detail})`:""}`;
+        }).join(" / ");
+        rows.push([b.name, o.eventName, evtStatusLabel(o.eventStatus), o.eventPrice||"", o.qty, batchStr, o.note||""]);
+      });
+    });
+    return rows;
+  };
+
+  const sheetOutput = (() => {
+    const rows = buildRows();
+    return [headers.join("\t"), ...rows.map(r => r.join("\t"))].join("\n");
+  })();
+
+  const csvOutput = (() => {
+    const escape = v => `"${String(v||"").replace(/"/g,'""')}"`;
+    const rows = buildRows();
+    return [headers.map(escape).join(","), ...rows.map(r => r.map(escape).join(","))].join("\n");
+  })();
+
+  const currentOutput = mode === "text" ? textOutput : mode === "sheet" ? sheetOutput : csvOutput;
+
+  const doCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(currentOutput);
+      setCopied(true);
+      setTimeout(()=>setCopied(false), 2000);
+    } catch (err) {
+      alert("複製失敗,請手動全選複製");
+    }
+  };
+
+  const doDownload = () => {
+    const bom = "﻿";
+    const blob = new Blob([bom + csvOutput], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0,10);
+    a.download = `訂購人_${title.replace(/[\/:*?"<>|]/g,"_")}_${date}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:680,maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:12 }}>
+          <h3 style={{ margin:0, fontSize:17, fontWeight:700 }}>👤 訂購人輸出</h3>
+          <span style={{ fontSize:12, color:"#888" }}>{title} · {totalBuyers} 人 · {totalOrders} 筆訂單 · {totalQty} 張</span>
+        </div>
+
+        {totalBuyers === 0 ? (
+          <div style={{ padding:"40px 20px",textAlign:"center",color:"#999",fontSize:14 }}>沒有訂購人可以輸出</div>
+        ) : (
+          <>
+            <div style={{ display:"flex",gap:4,marginBottom:10,padding:3,background:"#f0ede8",borderRadius:8 }}>
+              {[
+                { key:"text", label:"📱 LINE 文字" },
+                { key:"sheet", label:"📊 Excel/Sheet" },
+                { key:"csv", label:"📄 CSV 下載" },
+              ].map(t => (
+                <button key={t.key} onClick={()=>setMode(t.key)} style={{ flex:1,padding:"8px 12px",borderRadius:6,border:"none",background:mode===t.key?"#fff":"transparent",fontSize:12,fontWeight:700,cursor:"pointer",color:mode===t.key?"#2d2a26":"#888",fontFamily:"inherit",boxShadow:mode===t.key?"0 1px 3px rgba(0,0,0,.1)":"none" }}>{t.label}</button>
+              ))}
+            </div>
+
+            <div style={{ fontSize:11, color:"#888", marginBottom:6 }}>
+              {mode==="text" && "適合貼到 LINE 給客人對帳。每人聚合所有訂單,標出未付/待退/已取等狀態。"}
+              {mode==="sheet" && "適合貼到 Excel / Google Sheet。一筆訂單一列(同人多場會展開)。按複製後到表格 Ctrl+V 自動分欄。"}
+              {mode==="csv" && "下載 CSV 檔(含 BOM,Excel 開不會亂碼),適合做財務報表或匯入其他系統。"}
+            </div>
+
+            <textarea readOnly value={currentOutput} style={{ flex:1,minHeight:240,padding:"10px 12px",borderRadius:8,border:"1px solid #e4e0d8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
+
+            <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
+              <button onClick={onClose} style={{ padding:"8px 18px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>關閉</button>
+              {mode==="csv" ? (
+                <button onClick={doDownload} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>💾 下載 CSV</button>
+              ) : (
+                <button onClick={doCopy} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:copied?"#3a7a3a":"#2d2a26",color:"#faf9f6",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>{copied?"✓ 已複製":"📋 複製"}</button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function IdentityExportModal({ events, title, onClose }) {
   const [mode, setMode] = useState("text"); // text | sheet | csv
   const [copied, setCopied] = useState(false);
@@ -512,6 +664,7 @@ export default function App() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [inputModal, setInputModal] = useState(null);
   const [identityExportModal, setIdentityExportModal] = useState(null); // { events:[evt], title }
+  const [buyerExportModal, setBuyerExportModal] = useState(null); // { buyers: [...], title }
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
   const [editingName, setEditingName] = useState(null);
@@ -1085,7 +1238,7 @@ export default function App() {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1094,7 +1247,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
 
   // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
@@ -1131,7 +1284,7 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < 30000) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
       try {
         const newEvents = JSON.parse(e.newValue);
         if (Array.isArray(newEvents)) {
@@ -1147,7 +1300,7 @@ export default function App() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1166,7 +1319,7 @@ export default function App() {
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -1197,7 +1350,7 @@ export default function App() {
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1913,6 +2066,11 @@ export default function App() {
             <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
             <button onClick={exportCSV} style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>匯出CSV</button>
             {tab==="active"&&<button onClick={exportImage} title="把進行中場次存成一張圖，可傳到 LINE 隨時查看" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d8c4a8",background:"#faf3e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>🖼️ 匯出圖片</button>}
+            {tab==="buyers"&&(()=>{
+              const s=search.toLowerCase();
+              const fb=search?buyersAggregated.filter(b=>b.name.toLowerCase().includes(s)):buyersAggregated;
+              return <button onClick={()=>setBuyerExportModal({ buyers: fb, title: search?`篩選: "${search}"`:"全部訂購人" })} disabled={fb.length===0} title="把目前清單上的訂購人輸出成文字或 Excel" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:fb.length===0?"not-allowed":"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit",opacity:fb.length===0?.5:1 }}>📋 輸出訂購人</button>;
+            })()}
             <button onClick={exportBackup} title="匯出完整備份（JSON），可匯回" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #c4d9c4",background:"#f2f7f2",fontSize:12,cursor:"pointer",fontWeight:700,color:"#5a7a5a",fontFamily:"inherit" }}>💾 匯出備份</button>
             <button onClick={()=>fileInputRef.current?.click()} title="從備份檔還原資料" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #b8d4e8",background:"#eef6fa",fontSize:12,cursor:"pointer",fontWeight:700,color:"#2d6a8b",fontFamily:"inherit" }}>📥 匯入備份</button>
             <input type="file" ref={fileInputRef} accept=".json,application/json" style={{ display:"none" }} onChange={e=>{ const f=e.target.files?.[0]; if(f) handleImportFile(f); e.target.value=""; }}/>
@@ -2593,6 +2751,7 @@ export default function App() {
       {confirmModal&&<ConfirmModal msg={confirmModal.msg} onYes={confirmModal.onYes} onNo={confirmModal.onNo||(()=>setConfirmModal(null))} onDismiss={confirmModal.onDismiss||confirmModal.onNo||(()=>setConfirmModal(null))} yesLabel={confirmModal.yesLabel} noLabel={confirmModal.noLabel} maxWidth={confirmModal.maxWidth}/>}
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
+      {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
     </div>
   );
 }
