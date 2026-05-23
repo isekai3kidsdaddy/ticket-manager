@@ -2470,7 +2470,7 @@ export default function App() {
 function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
   const [showDropdown, setShowDropdown] = useState(false);
   // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
-  const [pos, setPos] = useState({ dir: "down", maxH: 280 });
+  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, anchorTop: 0, anchorBottom: 0 });
   const ref = useRef(null);
   const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
@@ -2491,18 +2491,13 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
       const vh = window.innerHeight;
       const below = vh - rect.bottom - PAD;
       const above = rect.top - PAD;
-      // PREFERRED:取「440px」跟「視窗 70%」較小者,讓桌機跟筆電都有大下拉
+      // PREFERRED:取「440px」跟「視窗 70%」較小者
       const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
-      // 先看哪邊空間夠 (>= MIN_USEFUL) 優先選那邊;不夠的話選比較大的那邊
-      // MIN_USEFUL=240 確保至少能顯示 ~7 個項目,寧可超出畫面一點也要堪用
-      const MIN_USEFUL = 240;
-      const fits = (s) => s >= MIN_USEFUL;
+      // 因為改 position:fixed,maxH 直接夾在可用空間內,不會超出螢幕
       let dir, maxH;
-      if (fits(below) && below >= above) { dir = "down"; maxH = Math.min(PREFERRED, below); }
-      else if (fits(above)) { dir = "up"; maxH = Math.min(PREFERRED, above); }
-      else if (below >= above) { dir = "down"; maxH = Math.max(MIN_USEFUL, below); }
-      else { dir = "up"; maxH = Math.max(MIN_USEFUL, above); }
-      setPos({ dir, maxH });
+      if (below >= above) { dir = "down"; maxH = Math.min(PREFERRED, Math.max(120, below)); }
+      else { dir = "up"; maxH = Math.min(PREFERRED, Math.max(120, above)); }
+      setPos({ dir, maxH, left: rect.left, width: rect.width, anchorTop: rect.top, anchorBottom: rect.bottom });
     };
     recalc();
     window.addEventListener("resize", recalc);
@@ -2572,11 +2567,11 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
           onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
           onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
           style={{
-            position:"absolute", left:0, right:0, zIndex:20,
+            position:"fixed", left:pos.left, width:pos.width, zIndex:1000,
             background:"#fff", borderRadius:6,
             border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
             maxHeight:pos.maxH, overflowY:"auto", WebkitOverflowScrolling:"touch",
-            ...(pos.dir === "down" ? { top:"100%", marginTop:2 } : { bottom:"100%", marginBottom:2 })
+            ...(pos.dir === "down" ? { top:pos.anchorBottom + 2 } : { bottom:(window.innerHeight - pos.anchorTop) + 2 })
         }}>
           {candidates.map((c, ci) => (
             <div key={ci} onClick={() => { if (dragRef.current.moved) return; handlePick(c); }}
@@ -2608,7 +2603,7 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [filter, setFilter] = useState("");
   // 下拉位置:預設往下,空間不夠時翻到上面;maxH 跟著可用空間調
-  const [pos, setPos] = useState({ dir: "down", maxH: 280 });
+  const [pos, setPos] = useState({ dir: "down", maxH: 280, left: 0, width: 0, anchorTop: 0, anchorBottom: 0 });
   const ref = useRef(null);
   const inputRef = useRef(null);
   // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
@@ -2625,18 +2620,13 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
       const vh = window.innerHeight;
       const below = vh - rect.bottom - PAD;
       const above = rect.top - PAD;
-      // PREFERRED:取「440px」跟「視窗 70%」較小者,讓桌機跟筆電都有大下拉
+      // PREFERRED:取「440px」跟「視窗 70%」較小者
       const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
-      // 先看哪邊空間夠 (>= MIN_USEFUL) 優先選那邊;不夠的話選比較大的那邊
-      // MIN_USEFUL=240 確保至少能顯示 ~7 個項目,寧可超出畫面一點也要堪用
-      const MIN_USEFUL = 240;
-      const fits = (s) => s >= MIN_USEFUL;
+      // 因為改 position:fixed,maxH 直接夾在可用空間內,不會超出螢幕
       let dir, maxH;
-      if (fits(below) && below >= above) { dir = "down"; maxH = Math.min(PREFERRED, below); }
-      else if (fits(above)) { dir = "up"; maxH = Math.min(PREFERRED, above); }
-      else if (below >= above) { dir = "down"; maxH = Math.max(MIN_USEFUL, below); }
-      else { dir = "up"; maxH = Math.max(MIN_USEFUL, above); }
-      setPos({ dir, maxH });
+      if (below >= above) { dir = "down"; maxH = Math.min(PREFERRED, Math.max(120, below)); }
+      else { dir = "up"; maxH = Math.min(PREFERRED, Math.max(120, above)); }
+      setPos({ dir, maxH, left: rect.left, width: rect.width, anchorTop: rect.top, anchorBottom: rect.bottom });
     };
     recalc();
     window.addEventListener("resize", recalc);
@@ -2675,10 +2665,10 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
           onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
           onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
           style={{
-            position:"absolute",left:0,right:0,
+            position:"fixed",left:pos.left,width:pos.width,
             background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",
-            maxHeight:pos.maxH,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:10,
-            ...(pos.dir === "down" ? { top:"100%", marginTop:4 } : { bottom:"100%", marginBottom:4 })
+            maxHeight:pos.maxH,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:1000,
+            ...(pos.dir === "down" ? { top:pos.anchorBottom + 4 } : { bottom:(window.innerHeight - pos.anchorTop) + 4 })
           }}>
           {fl.map(name=>(<div key={name} onClick={()=>{ if (dragRef.current.moved) return; onAdd(eventId,name);setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",cursor:"pointer",fontSize:14,borderBottom:"1px solid #f5f3ef",transition:"background .1s" }} onMouseOver={e=>e.target.style.background="#f5f3ef"} onMouseOut={e=>e.target.style.background="transparent"}>{name}</div>))}
         </div>
