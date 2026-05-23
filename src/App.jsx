@@ -2470,6 +2470,8 @@ export default function App() {
 function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const ref = useRef(null);
+  // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
+  const dragRef = useRef({ y: 0, moved: false });
   useEffect(() => {
     const h = e => { if (ref.current && !ref.current.contains(e.target)) setShowDropdown(false); };
     document.addEventListener("mousedown", h);
@@ -2528,14 +2530,17 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
         style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}
       />
       {showDropdown && candidates.length > 0 && (
-        <div style={{
+        <div
+          onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
+          onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
+          style={{
           position:"absolute", top:"100%", left:0, right:0, zIndex:20,
           marginTop:2, background:"#fff", borderRadius:6,
           border:"1px solid #c4b89a", boxShadow:"0 6px 18px rgba(0,0,0,.15)",
-          maxHeight:220, overflowY:"auto"
+          maxHeight:280, overflowY:"auto", WebkitOverflowScrolling:"touch"
         }}>
           {candidates.map((c, ci) => (
-            <div key={ci} onClick={() => handlePick(c)}
+            <div key={ci} onClick={() => { if (dragRef.current.moved) return; handlePick(c); }}
               style={{
                 padding:"7px 10px", cursor:"pointer",
                 borderBottom: ci < candidates.length - 1 ? "1px solid #f0ede8" : "none",
@@ -2564,6 +2569,8 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [filter, setFilter] = useState("");
   const ref = useRef(null);
+  // 觸控捲動偵測:手指滑動超過 8px 就視為「在捲動」,不要觸發 onClick
+  const dragRef = useRef({ y: 0, moved: false });
   useEffect(() => { const h = e => { if (ref.current && !ref.current.contains(e.target)) setShowDropdown(false); }; document.addEventListener("mousedown", h); return () => document.removeEventListener("mousedown", h); }, []);
   const fl = buyerNames.filter(n => !filter || n.toLowerCase().includes(filter.toLowerCase()));
   return (
@@ -2576,8 +2583,11 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
         )}
       </div>
       {showDropdown&&fl.length>0&&(
-        <div style={{ position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",maxHeight:200,overflowY:"auto",zIndex:10 }}>
-          {fl.map(name=>(<div key={name} onClick={()=>{onAdd(eventId,name);setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",cursor:"pointer",fontSize:14,borderBottom:"1px solid #f5f3ef",transition:"background .1s" }} onMouseOver={e=>e.target.style.background="#f5f3ef"} onMouseOut={e=>e.target.style.background="transparent"}>{name}</div>))}
+        <div
+          onTouchStart={e=>{ dragRef.current = { y: e.touches[0].clientY, moved: false }; }}
+          onTouchMove={e=>{ if (Math.abs(e.touches[0].clientY - dragRef.current.y) > 8) dragRef.current.moved = true; }}
+          style={{ position:"absolute",top:"100%",left:0,right:0,marginTop:4,background:"#fff",borderRadius:10,border:"1px solid #e4e0d8",boxShadow:"0 8px 24px rgba(0,0,0,.12)",maxHeight:280,overflowY:"auto",WebkitOverflowScrolling:"touch",zIndex:10 }}>
+          {fl.map(name=>(<div key={name} onClick={()=>{ if (dragRef.current.moved) return; onAdd(eventId,name);setFilter("");setShowDropdown(false);}} style={{ padding:"8px 14px",cursor:"pointer",fontSize:14,borderBottom:"1px solid #f5f3ef",transition:"background .1s" }} onMouseOver={e=>e.target.style.background="#f5f3ef"} onMouseOut={e=>e.target.style.background="transparent"}>{name}</div>))}
         </div>
       )}
     </div>
