@@ -2499,16 +2499,17 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
   }, [history, q]);
 
   const handlePick = (record) => {
-    // 只填空欄位 (不覆蓋使用者已經填的)
+    // 只填空欄位 (不覆蓋使用者已經填的);
+    // 且只在「記錄裡真的有資料」時才填,避免寫入空字串造成假上傳
     const updates = { name: record.name };
-    if (!identity.phone) updates.phone = record.phone || "";
-    if (!identity.idNumber) updates.idNumber = record.idNumber || "";
+    if (!identity.phone && record.phone) updates.phone = record.phone;
+    if (!identity.idNumber && record.idNumber) updates.idNumber = record.idNumber;
     // 拓元專屬欄位:非拓元場不帶,避免悄悄寫入隱藏欄位造成困惑
     if (isTix) {
-      if (!identity.tixAccount) updates.tixAccount = record.tixAccount || "";
-      if (!identity.loginVia) updates.loginVia = record.loginVia || "";
-      if (identity.locked === undefined || identity.locked === null) {
-        updates.locked = !!record.locked;
+      if (!identity.tixAccount && record.tixAccount) updates.tixAccount = record.tixAccount;
+      if (!identity.loginVia && record.loginVia) updates.loginVia = record.loginVia;
+      if ((identity.locked === undefined || identity.locked === null) && record.locked) {
+        updates.locked = true;
       }
     }
     // 注意:不填 memberNo (每場不同) 也不填 qty (是當前場次的張數)
