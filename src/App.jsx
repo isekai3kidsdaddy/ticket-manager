@@ -793,6 +793,14 @@ export default function App() {
     const currentSig = makeSignature(events, buyerNames, logs);
     if (currentSig === lastSavedSignature.current) return; // 內容沒變不上傳
 
+    // 防護 1.5:衝突彈窗開著時不要繼續上傳,避免覆蓋掉前一個彈窗
+    // (彈窗被覆蓋的話前一個衝突狀態會丟失)
+    if (confirmModal) {
+      // 把 saveTimer 清掉避免 setTimeout 觸發
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+      return;
+    }
+
     // 防護 2:檢查使用者是否最近有互動。閒置太久的視窗不主動上傳。
     const idle = Date.now() - lastInteractionRef.current > IDLE_MS;
     if (idle) return; // 閒置中,不上傳
@@ -861,7 +869,7 @@ export default function App() {
                 setEvents(safeMergedEvents);
                 setBuyerNames(mergedNames);
                 setLogs(mergedLogs);
-                const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs }, null);
+                const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs }, null, { force: true });
                 if (force.ok) {
                   setSyncStatus("saved");
                   setLastSyncedAt(force.updatedAt);
@@ -878,7 +886,7 @@ export default function App() {
                 setEvents(otherChoiceEvents);
                 setBuyerNames(mergedNames);
                 setLogs(mergedLogs);
-                const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs }, null);
+                const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs }, null, { force: true });
                 if (force.ok) {
                   setSyncStatus("saved");
                   setLastSyncedAt(force.updatedAt);
@@ -894,7 +902,7 @@ export default function App() {
         setSyncStatus("error");
       }
     }, 800);
-  }, [events, buyerNames, logs]);
+  }, [events, buyerNames, logs, confirmModal]);
 
   // 安全 refetch:用 mergeEvents 智慧合併,保留本地未上傳的修改
   const refetchFromCloud = async () => {
@@ -1271,7 +1279,7 @@ export default function App() {
         if (SUPABASE_READY) {
           (async () => {
             setSyncStatus("saving");
-            const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs }, null);
+            const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs }, null, { force: true });
             if (force.ok) {
               setSyncStatus("saved");
               setLastSyncedAt(force.updatedAt);
@@ -1332,7 +1340,7 @@ export default function App() {
                   events: data.events,
                   buyerNames: Array.isArray(data.buyerNames) ? data.buyerNames : buyerNames,
                   logs: Array.isArray(data.logs) ? data.logs : logs,
-                }, null);
+                }, null, { force: true });
                 if (force.ok) {
                   setSyncStatus("saved");
                   setLastSyncedAt(force.updatedAt);
