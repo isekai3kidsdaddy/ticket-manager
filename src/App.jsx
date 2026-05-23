@@ -2487,15 +2487,22 @@ function IdentityNameAutocomplete({ identity, history, onFill, isTix = true }) {
     const recalc = () => {
       if (!inputRef.current) return;
       const rect = inputRef.current.getBoundingClientRect();
-      const PAD = 20;
-      const below = window.innerHeight - rect.bottom - PAD;
+      const PAD = 8;
+      const vh = window.innerHeight;
+      const below = vh - rect.bottom - PAD;
       const above = rect.top - PAD;
-      const PREFERRED = 280;
-      if (below >= 200 || below >= above) {
-        setPos({ dir: "down", maxH: Math.max(120, Math.min(PREFERRED, below)) });
-      } else {
-        setPos({ dir: "up", maxH: Math.max(120, Math.min(PREFERRED, above)) });
-      }
+      // PREFERRED:取「440px」跟「視窗 70%」較小者,讓桌機跟筆電都有大下拉
+      const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
+      // 先看哪邊空間夠 (>= MIN_USEFUL) 優先選那邊;不夠的話選比較大的那邊
+      // MIN_USEFUL=240 確保至少能顯示 ~7 個項目,寧可超出畫面一點也要堪用
+      const MIN_USEFUL = 240;
+      const fits = (s) => s >= MIN_USEFUL;
+      let dir, maxH;
+      if (fits(below) && below >= above) { dir = "down"; maxH = Math.min(PREFERRED, below); }
+      else if (fits(above)) { dir = "up"; maxH = Math.min(PREFERRED, above); }
+      else if (below >= above) { dir = "down"; maxH = Math.max(MIN_USEFUL, below); }
+      else { dir = "up"; maxH = Math.max(MIN_USEFUL, above); }
+      setPos({ dir, maxH });
     };
     recalc();
     window.addEventListener("resize", recalc);
@@ -2614,16 +2621,22 @@ function AddBuyerRow({ eventId, buyerNames, onAdd }) {
     const recalc = () => {
       if (!inputRef.current) return;
       const rect = inputRef.current.getBoundingClientRect();
-      const PAD = 20;
-      const below = window.innerHeight - rect.bottom - PAD;
+      const PAD = 8;
+      const vh = window.innerHeight;
+      const below = vh - rect.bottom - PAD;
       const above = rect.top - PAD;
-      const PREFERRED = 280;
-      // 下方空間 >= 200 或 >= 上方 → 往下;否則翻到上面
-      if (below >= 200 || below >= above) {
-        setPos({ dir: "down", maxH: Math.max(120, Math.min(PREFERRED, below)) });
-      } else {
-        setPos({ dir: "up", maxH: Math.max(120, Math.min(PREFERRED, above)) });
-      }
+      // PREFERRED:取「440px」跟「視窗 70%」較小者,讓桌機跟筆電都有大下拉
+      const PREFERRED = Math.min(440, Math.floor(vh * 0.7));
+      // 先看哪邊空間夠 (>= MIN_USEFUL) 優先選那邊;不夠的話選比較大的那邊
+      // MIN_USEFUL=240 確保至少能顯示 ~7 個項目,寧可超出畫面一點也要堪用
+      const MIN_USEFUL = 240;
+      const fits = (s) => s >= MIN_USEFUL;
+      let dir, maxH;
+      if (fits(below) && below >= above) { dir = "down"; maxH = Math.min(PREFERRED, below); }
+      else if (fits(above)) { dir = "up"; maxH = Math.min(PREFERRED, above); }
+      else if (below >= above) { dir = "down"; maxH = Math.max(MIN_USEFUL, below); }
+      else { dir = "up"; maxH = Math.max(MIN_USEFUL, above); }
+      setPos({ dir, maxH });
     };
     recalc();
     window.addEventListener("resize", recalc);
