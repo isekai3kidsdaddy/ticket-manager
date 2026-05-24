@@ -690,6 +690,17 @@ export default function App() {
   });
   const snap = () => JSON.parse(JSON.stringify(events));
 
+  // 同步寫 log:只在合併後 events 真的跟當下不同時才記,避免 polling 洗版
+  // snapshot 是「當下還沒被覆蓋的版本」,可供「還原中心」倒回
+  const logSyncIfChanged = (newEvents, msg) => {
+    try {
+      const before = stableStringify(events);
+      const after = stableStringify(newEvents);
+      if (before === after) return;
+    } catch {}
+    addLog(msg, snap());
+  };
+
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
   const [syncStatus, setSyncStatus] = useState(SUPABASE_READY ? "loading" : "offline");
   // 偵測瀏覽器是否離線(navigator.onLine)
@@ -963,6 +974,7 @@ export default function App() {
               const mergeResult = mergeEvents(events, base.events||[], remoteP.events||[]);
               const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames||[]);
               const mergedLogs = mergeLogs(logs, remoteP.logs||[]);
+              logSyncIfChanged(mergeResult.merged, `🔄 開啟 app 時合併雲端與本地`);
               setEvents(mergeResult.merged);
               setBuyerNames(mergedNames);
               setLogs(mergedLogs);
@@ -1092,6 +1104,7 @@ export default function App() {
         if (mergeResult.conflicts.length === 0) {
           // 沒有真衝突 -> 自動合併並上傳
           const mergedEvents = mergeResult.merged;
+          logSyncIfChanged(mergedEvents, `🔄 上傳時偵測到雲端更新,自動合併`);
           setEvents(mergedEvents);
           setBuyerNames(mergedNames);
           setLogs(mergedLogs);
@@ -1135,6 +1148,7 @@ export default function App() {
                 savingInFlightRef.current = true;
                 try {
                   setSyncStatus("saving");
+                  logSyncIfChanged(safeMergedEvents, `🛡 衝突解決:保留我的版本`);
                   setEvents(safeMergedEvents);
                   setBuyerNames(mergedNames);
                   setLogs(mergedLogs);
@@ -1156,6 +1170,8 @@ export default function App() {
                 savingInFlightRef.current = true;
                 try {
                   setSyncStatus("saving");
+                  // 注意:此 log 特別重要,因為「採用對方」會把本地資料替換成雲端,容易被誤點
+                  logSyncIfChanged(otherChoiceEvents, `🔄 衝突解決:採用對方版本(本地被替換)`);
                   setEvents(otherChoiceEvents);
                   setBuyerNames(mergedNames);
                   setLogs(mergedLogs);
@@ -1202,6 +1218,7 @@ export default function App() {
 
         // 如果有衝突,不要靜默覆蓋。把雲端拉下來但保留本地修改(本地優先)
         const finalEvents = mergeResult.merged;
+        logSyncIfChanged(finalEvents, `🔄 頁面回前景,合併雲端更新`);
         setEvents(finalEvents);
         setBuyerNames(mergedNames);
         setLogs(mergedLogs);
@@ -1289,6 +1306,7 @@ export default function App() {
         const newEvents = JSON.parse(e.newValue);
         if (Array.isArray(newEvents)) {
           // 直接用其他分頁寫入的版本
+          logSyncIfChanged(newEvents, `🔄 從其他分頁同步`);
           setEvents(newEvents);
         }
         // buyerNames / logs 也跟著拉
@@ -1336,7 +1354,8 @@ export default function App() {
         const mergedLogs = mergeLogs(logs, remoteP.logs || []);
 
         if (mergeResult.conflicts.length === 0) {
-          // 無衝突:靜默合併
+          // 無衝突:靜默合併 (但會在時間軸留下紀錄,方便排查資料變動來源)
+          logSyncIfChanged(mergeResult.merged, `🔄 自動同步:雲端有新版本已合併`);
           setEvents(mergeResult.merged);
           setBuyerNames(mergedNames);
           setLogs(mergedLogs);
@@ -1499,7 +1518,9 @@ export default function App() {
 
       // 動作類型判斷（影響圖示和顏色）
       let kind = "other", icon = "•", color = "#999";
-      if (/^新增「/.test(rest))             { kind = "add";    icon = "➕"; color = "#3a7a3a"; }
+      // 同步相關 (🔄 / 🛡 開頭) 優先比對,避免被下面其他規則匹掉
+      if (/^🔄|^🛡/.test(msg))               { kind = "sync";   icon = "🔄"; color = "#5a8aab"; }
+      else if (/^新增「/.test(rest))             { kind = "add";    icon = "➕"; color = "#3a7a3a"; }
       else if (/^移除「/.test(rest))        { kind = "remove"; icon = "✖";  color = "#c47070"; }
       else if (/張數/.test(rest))           { kind = "qty";    icon = "🔢"; color = "#4a7aab"; }
       else if (/狀態/.test(rest) || /待退費|已退款|已取票|未付款/.test(rest)) { kind = "status"; icon = "🏷"; color = "#a87830"; }
@@ -2681,6 +2702,7 @@ export default function App() {
               { key:"batch", label:"分批", icon:"📦", count:counts.batch||0, color:"#5a7aab" },
               { key:"price", label:"票價", icon:"💰", count:counts.price||0, color:"#3a8a7a" },
               { key:"rename", label:"改名", icon:"✎", count:counts.rename||0, color:"#888" },
+              { key:"sync", label:"同步/合併", icon:"🔄", count:counts.sync||0, color:"#5a8aab" },
               { key:"other", label:"其他", icon:"•", count:counts.other||0, color:"#999" },
             ].filter(f => f.key===null || f.count>0);
             return (
