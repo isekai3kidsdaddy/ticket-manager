@@ -724,7 +724,9 @@ export default function App() {
   // 「使用者是否最近有互動」——閒置 5 分鐘以上的視窗不會主動上傳
   const lastInteractionRef = useRef(Date.now());
   const storageWarnedRef = useRef(false);
-  const IDLE_MS = 5 * 60 * 1000; // 5 分鐘
+  const IDLE_MS = 5 * 60 * 1000;
+  // STICKY_WINDOW_MS:互動後的「保護期」。期間內衝突一律強制保留本地,不做自動合併,避免被別的裝置/分頁覆寫
+  const STICKY_WINDOW_MS = 5 * 60 * 1000; // 5 分鐘
 
   // 把 events/buyerNames/logs 變成一個字串指紋(用 JSON.stringify 簡單夠用)
   // 注意:logs 的 snapshot 欄位在計算指紋時要被剝掉,
@@ -1091,6 +1093,25 @@ export default function App() {
         // 更新合併基準為「我剛上傳的版本」
         updateBase({ events, buyerNames, logs });
       } else if (res.reason === "stale" && res.remote && res.remote.payload) {
+        // ── 防線 A:剛剛動過 → 直接強制保留本地,不做合併 ──
+        // 這是最常見的情境:使用者正在編輯,有其他裝置/分頁在背景做雲端更新
+        // 自動 merge 容易因為 base 跟 remote 等於同一值而誤判 myChanged=false,把本地的修改沖回去
+        // 寧可粗暴覆蓋雲端,也不要讓使用者剛改的東西被默默還原
+        if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) {
+          addLog(`🛡 偵測雲端衝突,因您 5 分鐘內動過,強制保留本地版本`, snap());
+          const fres = await saveToSupabase({ events, buyerNames, logs: slimLogsForCloud(logs) }, null, { force: true });
+          if (fres.ok) {
+            setSyncStatus("saved");
+            setLastSyncedAt(fres.updatedAt);
+            lastSyncedAtRef.current = fres.updatedAt;
+            lastSavedSignature.current = currentSig;
+            updateBase({ events, buyerNames, logs });
+          } else {
+            setSyncStatus("error");
+          }
+          return;
+        }
+        // ── 防線 A 沒觸發 → 走原本的 3-way merge ──
         // 衝突:雲端有更新的版本。嘗試 3-way merge
         const remoteP = res.remote.payload;
         const remoteTs = res.remote.updatedAt;
@@ -1247,8 +1268,8 @@ export default function App() {
       if (saveTimer.current) return;
       // 正在 in-flight 上傳 → 不要打斷
       if (savingInFlightRef.current) return;
-      // 30 秒內有互動 → 使用者正在用,不打斷
-      if (Date.now() - lastInteractionRef.current < 30000) return;
+      // STICKY_WINDOW_MS 內有互動 → 使用者正在用,不打斷
+      if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       // 衝突彈窗開著 → 不要干擾
       if (confirmModal) return;
       // 使用者正在編輯輸入框 → 不要打斷
@@ -1298,7 +1319,7 @@ export default function App() {
       // 編輯中、有衝突彈窗、in-flight 上傳、最近有互動 → 不打斷
       if (confirmModal) return;
       if (saveTimer.current || savingInFlightRef.current) return;
-      if (Date.now() - lastInteractionRef.current < 30000) return;
+      if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
@@ -1330,8 +1351,8 @@ export default function App() {
       if (document.visibilityState !== "visible") return; // 背景中不 poll
       if (saveTimer.current) return; // 正在準備上傳,跳過這次
       if (savingInFlightRef.current) return; // in-flight 上傳中,跳過這次
-      // 30 秒內有互動 → 使用者正在打字/點擊,不打斷
-      if (Date.now() - lastInteractionRef.current < 30000) return;
+      // STICKY_WINDOW_MS 內有互動 → 使用者正在打字/點擊,不打斷,避免雲端覆寫本地修改
+      if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       // 衝突彈窗開著 → 不要干擾
       if (confirmModal) return;
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
