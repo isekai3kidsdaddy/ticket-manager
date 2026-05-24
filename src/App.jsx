@@ -825,6 +825,18 @@ export default function App() {
   const lastSavedSignature = useRef(null);
   // 「使用者是否最近有互動」——閒置 5 分鐘以上的視窗不會主動上傳
   const lastInteractionRef = useRef(Date.now());
+  // 追蹤「我最近動過哪些場次」,用來在多人協作時做 per-event 決策
+  // Map: eventId -> { action: "touch" | "delete", time: ms }
+  const eventActionRef = useRef(new Map());
+  const recordEventAction = (eventId, action) => {
+    if (eventId) eventActionRef.current.set(eventId, { action, time: Date.now() });
+  };
+  const getRecentEventAction = (eventId) => {
+    const rec = eventActionRef.current.get(eventId);
+    if (!rec) return null;
+    if (Date.now() - rec.time > 5 * 60 * 1000) return null;
+    return rec.action;
+  };
   const storageWarnedRef = useRef(false);
   const IDLE_MS = 5 * 60 * 1000;
   // STICKY_WINDOW_MS:互動後的「保護期」。期間內衝突一律強制保留本地,不做自動合併,避免被別的裝置/分頁覆寫
@@ -1245,30 +1257,84 @@ export default function App() {
         // 更新合併基準為「我剛上傳的版本」
         updateBase({ events, buyerNames, logs });
       } else if (res.reason === "stale" && res.remote && res.remote.payload) {
-        // ── 防線 A:剛剛動過 → 直接強制保留本地,不做合併 ──
-        // 這是最常見的情境:使用者正在編輯,有其他裝置/分頁在背景做雲端更新
-        // 自動 merge 容易因為 base 跟 remote 等於同一值而誤判 myChanged=false,把本地的修改沖回去
-        // 寧可粗暴覆蓋雲端,也不要讓使用者剛改的東西被默默還原
+        // ── 防線 A:剛剛動過 → 逐場智能合併,保留多人協作 ──
+        // 對於我最近動過的場次 → 我的版本贏
+        // 對於我沒動的場次(可能是員工改的) → 用雲端版本
+        // 對於只有雲端有的場次(員工新增的) → 收進來
+        // 對於只有本地有的場次(我新增的) → 保留
+        // 對於只有本地刪除的場次 → 不要從雲端重新撈回
         if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) {
-          // ⚠ 不能直接呼叫 addLog,因為它會 setLogs 觸發 useEffect 重跑、再 save、再 stale、又 force,迴圈
-          // 方法:預先算好「加入保護 log 後」的未來狀態 + 未來 sig,等 force-push 成功才用 setLogs 一次寫完
+          const remoteEvents = res.remote.payload.events || [];
+          const baseSnap = baseSnapshotRef.current || { events, buyerNames, logs };
+          const baseEvents = baseSnap.events || [];
+          const remoteById = new Map(remoteEvents.map(e => [e.id, e]));
+          const myById = new Map((events || []).map(e => [e.id, e]));
+          const baseById = new Map(baseEvents.map(e => [e.id, e]));
+          const allIds = new Set([...myById.keys(), ...remoteById.keys()]);
+          const smartMerged = [];
+          let myWinCount = 0, remoteWinCount = 0, deletedSkipCount = 0;
+
+          for (const id of allIds) {
+            const my = myById.get(id);
+            const remote = remoteById.get(id);
+            const baseE = baseById.get(id);
+            const recent = getRecentEventAction(id);
+
+            if (my && remote) {
+              // 兩邊都有 → 看我有沒有最近動過
+              if (recent === "touch") {
+                smartMerged.push(my); // 我動過,我贏
+                myWinCount++;
+              } else {
+                // 沒動過 → 標準 3-way 合併
+                const myChanged = !baseE || !eventEqual(my, baseE);
+                const remoteChanged = !baseE || !eventEqual(remote, baseE);
+                if (myChanged && !remoteChanged) smartMerged.push(my);
+                else if (!myChanged && remoteChanged) { smartMerged.push(remote); remoteWinCount++; }
+                else if (!myChanged && !remoteChanged) smartMerged.push(my);
+                else smartMerged.push(my); // 都改了 → 預設 my,但這場我沒最近動過比較少見
+              }
+            } else if (my && !remote) {
+              smartMerged.push(my); // 我新增的
+            } else if (!my && remote) {
+              if (recent === "delete") {
+                // 我剛刪掉的,雲端不要重新塞回來
+                deletedSkipCount++;
+              } else {
+                smartMerged.push(remote); // 員工新增的場次
+                remoteWinCount++;
+              }
+            }
+          }
+
+          // buyerNames 採聯集 (誰新增的都保留)
+          const mergedNames = mergeBuyerNames(buyerNames, res.remote.payload.buyerNames || []);
+          // logs 採聯集 (雙方的記錄都保留)
+          const mergedLogs = mergeLogs(logs, res.remote.payload.logs || []);
+
+          // 預先算未來 sig (含保護 log) 避免 setLogs 觸發迴圈
           const SNAPSHOT_KEEP_LOCAL = 10;
+          const detailMsg = remoteWinCount > 0 || deletedSkipCount > 0
+            ? `🛡 雲端衝突,智能合併 (我贏 ${myWinCount} 場, 採用雲端 ${remoteWinCount} 場${deletedSkipCount>0?`, 拒收 ${deletedSkipCount} 個雲端版本`:""})`
+            : `🛡 偵測雲端衝突,因您 5 分鐘內動過,強制保留本地版本`;
           const newProtectLog = {
             id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
             time: Date.now(),
-            msg: `🛡 偵測雲端衝突,因您 5 分鐘內動過,強制保留本地版本`,
+            msg: detailMsg,
             snapshot: snap(),
           };
-          const newLogs = [newProtectLog, ...logs].slice(0, 500)
+          const newLogs = [newProtectLog, ...mergedLogs].slice(0, 500)
             .map((l, idx) => idx < SNAPSHOT_KEEP_LOCAL ? l : { ...l, snapshot: null });
-          const futureSig = makeSignature(events, buyerNames, newLogs);
-          const fres = await saveToSupabase({ events, buyerNames, logs: slimLogsForCloud(newLogs) }, null, { force: true });
+          const futureSig = makeSignature(smartMerged, mergedNames, newLogs);
+          const fres = await saveToSupabase({ events: smartMerged, buyerNames: mergedNames, logs: slimLogsForCloud(newLogs) }, null, { force: true });
           if (fres.ok) {
             setSyncStatus("saved");
             setLastSyncedAt(fres.updatedAt);
             lastSyncedAtRef.current = fres.updatedAt;
-            lastSavedSignature.current = futureSig; // 關鍵:設成「未來 sig」,setLogs 觸發的 re-render 才不會誤判要重 save
-            updateBase({ events, buyerNames, logs: newLogs });
+            lastSavedSignature.current = futureSig;
+            updateBase({ events: smartMerged, buyerNames: mergedNames, logs: newLogs });
+            setEvents(smartMerged); // 把合併結果反映到本地畫面 (員工的非衝突改動也會出現)
+            setBuyerNames(mergedNames);
             setLogs(newLogs);
           } else {
             setSyncStatus("error");
@@ -1767,6 +1833,8 @@ export default function App() {
     });
     if (newValues.locked !== undefined) cleanUpdates.locked = !!newValues.locked;
     addLog(`📇 批次更新實名「${entry.name}」(${entry.refs.length} 個場次)`, snap());
+    // 標記:每個被影響的場次都算我動過
+    entry.refs.forEach(r => recordEventAction(r.eventId, "touch"));
     setEvents(prev => prev.map(evt => {
       // 沒被引用就跳過,效能最佳化
       const hasRef = entry.refs.some(r => r.eventId === evt.id);
@@ -1841,7 +1909,10 @@ export default function App() {
     }, 100);
   };
 
-  const updateEvent = (id, fn) => setEvents(evs => evs.map(e => e.id === id ? fn({ ...e, buyers: [...(e.buyers || [])] }) : e));
+  const updateEvent = (id, fn) => {
+    recordEventAction(id, "touch"); // 標記:這個場次我剛動過
+    setEvents(evs => evs.map(e => e.id === id ? fn({ ...e, buyers: [...(e.buyers || [])] }) : e));
+  };
 
   const addBuyerToEvent = (eventId, name) => {
     addLog(`【${getEventName(eventId)}】新增「${name}」`, snap());
@@ -1978,7 +2049,7 @@ export default function App() {
   };
 
   const deleteEvent = (eventId) => {
-    setConfirmModal({ msg: `確定要刪除「${getEventName(eventId)}」嗎？可透過紀錄還原。`, onYes: () => { addLog(`刪除場次【${getEventName(eventId)}】`, snap()); setEvents(evs => evs.filter(e => e.id !== eventId)); setConfirmModal(null); } });
+    setConfirmModal({ msg: `確定要刪除「${getEventName(eventId)}」嗎？可透過紀錄還原。`, onYes: () => { addLog(`刪除場次【${getEventName(eventId)}】`, snap()); recordEventAction(eventId, "delete"); setEvents(evs => evs.filter(e => e.id !== eventId)); setConfirmModal(null); } });
   };
 
   const undoTo = (log) => {
