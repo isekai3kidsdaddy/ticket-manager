@@ -359,6 +359,92 @@ function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder 
   );
 }
 
+// 資料差異對照 Modal:逐筆顯示跟快照的差異,標記「有 log 解釋」vs「無法解釋」
+function DataDiffModal({ diff, onClose, onRestore }) {
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const Row = ({ icon, color, text, sub, explained, expl }) => (
+    <div style={{ display:"flex",alignItems:"flex-start",gap:8,padding:"7px 0",borderBottom:"1px solid #f5f3ef" }}>
+      <span style={{ fontSize:14,color,minWidth:18 }}>{icon}</span>
+      <div style={{ flex:1,minWidth:0 }}>
+        <div style={{ fontSize:13,color:"#2d2a26" }}>{text}</div>
+        {sub && <div style={{ fontSize:11,color:"#888",marginTop:2 }}>{sub}</div>}
+        {explained === true && expl && <div style={{ fontSize:10,color:"#5a7a5a",marginTop:2 }}>✓ 有對應 log: {expl}</div>}
+        {explained === false && <div style={{ fontSize:10,color:"#c47070",marginTop:2,fontWeight:700 }}>⚠ 找不到對應 log → 可能是資料消失</div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:720,maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:8 }}>
+          <h3 style={{ margin:0,fontSize:17,fontWeight:700 }}>🔍 與 {diff.prevKey} 的差異</h3>
+          <button onClick={()=>onRestore(diff.prevKey)} style={{ padding:"6px 14px",borderRadius:7,border:"1.5px solid #d4cdb8",background:"#faf7f0",fontSize:12,cursor:"pointer",fontWeight:700,color:"#7a5a30",fontFamily:"inherit" }}>⟲ 還原到 {diff.prevKey}</button>
+        </div>
+
+        {/* 摘要 */}
+        <div style={{ background:diff.alert?"#fff0eb":"#f7f3ec",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:12,color:"#7a5a30",border:`1px solid ${diff.alert?"#e09080":"#e4e0d8"}` }}>
+          {diff.alert ? (
+            <><b style={{ color:"#8b3a3a" }}>⚠ 偵測到 {diff.unexplained} 筆「找不到對應 log」的變動</b>,可能是同步異常導致資料消失。若不是你刻意操作,建議「⟲ 還原到 {diff.prevKey}」。</>
+          ) : (
+            <>所有變動都有對應的操作 log,看起來是正常的編輯。</>
+          )}
+        </div>
+
+        <div style={{ flex:1,overflowY:"auto",padding:"0 4px" }}>
+          {/* 場次新增 */}
+          {diff.eventsAdded.length > 0 && (
+            <details open style={{ marginBottom:8 }}>
+              <summary style={{ fontSize:13,fontWeight:700,padding:"6px 0",color:"#5a7a5a",cursor:"pointer" }}>🆕 場次新增 ({diff.eventsAdded.length})</summary>
+              {diff.eventsAdded.map((e, i) => (<Row key={i} icon="+" color="#5a7a5a" text={e.name}/>))}
+            </details>
+          )}
+          {/* 場次刪除 */}
+          {diff.eventsRemoved.length > 0 && (
+            <details open style={{ marginBottom:8 }}>
+              <summary style={{ fontSize:13,fontWeight:700,padding:"6px 0",color:"#c47070",cursor:"pointer" }}>🗑 場次刪除 ({diff.eventsRemoved.length})</summary>
+              {diff.eventsRemoved.map((e, i) => (<Row key={i} icon="−" color="#c47070" text={e.name} sub={`原有 ${e.buyerCount} 人 · ${e.qty} 張`} explained={e.explained} expl={e.explanation}/>))}
+            </details>
+          )}
+          {/* 訂購人新增 */}
+          {diff.buyersAdded.length > 0 && (
+            <details style={{ marginBottom:8 }}>
+              <summary style={{ fontSize:13,fontWeight:700,padding:"6px 0",color:"#5a7a5a",cursor:"pointer" }}>👤 訂購人新增 ({diff.buyersAdded.length})</summary>
+              {diff.buyersAdded.map((b, i) => (<Row key={i} icon="+" color="#5a7a5a" text={`${b.buyerName} (${b.qty} 張)`} sub={`@${b.eventName}`}/>))}
+            </details>
+          )}
+          {/* 訂購人刪除 */}
+          {diff.buyersRemoved.length > 0 && (
+            <details open style={{ marginBottom:8 }}>
+              <summary style={{ fontSize:13,fontWeight:700,padding:"6px 0",color:"#c47070",cursor:"pointer" }}>👤 訂購人刪除 ({diff.buyersRemoved.length})</summary>
+              {diff.buyersRemoved.map((b, i) => (<Row key={i} icon="−" color="#c47070" text={`${b.buyerName} (原 ${b.qty} 張)`} sub={`@${b.eventName}`} explained={b.explained} expl={b.explanation}/>))}
+            </details>
+          )}
+          {/* 張數減少 */}
+          {diff.qtyDecreases.length > 0 && (
+            <details open style={{ marginBottom:8 }}>
+              <summary style={{ fontSize:13,fontWeight:700,padding:"6px 0",color:"#c47070",cursor:"pointer" }}>📉 張數減少 ({diff.qtyDecreases.length})</summary>
+              {diff.qtyDecreases.map((q, i) => (<Row key={i} icon="↓" color="#c47070" text={`${q.buyerName}:${q.prevQty}→${q.currQty} 張`} sub={`@${q.eventName} · 少 ${q.prevQty - q.currQty} 張`} explained={q.explained} expl={q.explanation}/>))}
+            </details>
+          )}
+          {diff.eventsAdded.length + diff.eventsRemoved.length + diff.buyersAdded.length + diff.buyersRemoved.length + diff.qtyDecreases.length === 0 && (
+            <div style={{ padding:"30px 20px",textAlign:"center",color:"#999",fontSize:13 }}>沒有差異 ✓</div>
+          )}
+        </div>
+
+        <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end",borderTop:"1px solid #f0ede8",paddingTop:12 }}>
+          <button onClick={onClose} style={{ padding:"8px 18px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>關閉</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // 訂購人輸出 Modal:把訂購人清單轉成 LINE 文字 / Excel / CSV
 function BuyerExportModal({ buyers, title, onClose }) {
   const [mode, setMode] = useState("text"); // text | sheet | csv
@@ -660,6 +746,13 @@ export default function App() {
   const [showAddEvent, setShowAddEvent] = useState(false);
   const [editingDetail, setEditingDetail] = useState(null);
   const [showLog, setShowLog] = useState(false);
+  // 每日自動備份 + 健康監測
+  const [dataDiffModal, setDataDiffModal] = useState(null); // 開啟差異對照 modal
+  const [dailySnapshots, setDailySnapshots] = useState(() => {
+    try { const s = window.localStorage?.getItem?.("tkm-v3-daily"); if (s) return JSON.parse(s); } catch {}
+    return {};
+  });
+  const dailySnapshotCheckedRef = useRef(false);
   const [logs, setLogs] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-logs"); if (s) return JSON.parse(s); } catch {} return []; });
   const [confirmModal, setConfirmModal] = useState(null);
   const [inputModal, setInputModal] = useState(null);
@@ -689,6 +782,15 @@ export default function App() {
     return arr.map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
   });
   const snap = () => JSON.parse(JSON.stringify(events));
+
+  // 從每日快照還原
+  const restoreFromDaily = (dateKey) => {
+    const ds = dailySnapshots[dateKey];
+    if (!ds || !ds.payload) return;
+    addLog(`📅 從 ${dateKey} 的每日快照還原`, snap());
+    setEvents(ds.payload.events || []);
+    setBuyerNames(ds.payload.buyerNames || []);
+  };
 
   // 同步寫 log:只在合併後 events 真的跟當下不同時才記,避免 polling 洗版
   // snapshot 是「當下還沒被覆蓋的版本」,可供「還原中心」倒回
@@ -727,6 +829,21 @@ export default function App() {
   const IDLE_MS = 5 * 60 * 1000;
   // STICKY_WINDOW_MS:互動後的「保護期」。期間內衝突一律強制保留本地,不做自動合併,避免被別的裝置/分頁覆寫
   const STICKY_WINDOW_MS = 5 * 60 * 1000; // 5 分鐘
+
+  // 計算總覽:場次/訂購人/張數
+  const computeTotals = (evts) => {
+    let totalBuyers = 0;
+    let totalQty = 0;
+    (evts || []).forEach(e => {
+      const buyers = e.buyers || [];
+      totalBuyers += buyers.length;
+      buyers.forEach(b => {
+        const bs = Array.isArray(b.batches) && b.batches.length > 0 ? b.batches : [{qty: b.qty || 0}];
+        totalQty += bs.reduce((s, x) => s + (x.qty || 0), 0);
+      });
+    });
+    return { totalEvents: (evts || []).length, totalBuyers, totalQty };
+  };
 
   // 把 events/buyerNames/logs 變成一個字串指紋(用 JSON.stringify 簡單夠用)
   // 注意:logs 的 snapshot 欄位在計算指紋時要被剝掉,
@@ -1012,6 +1129,41 @@ export default function App() {
     };
   }, []);
 
+  // 每日自動備份:初始載入完成後檢查,今天還沒拍就拍一張
+  useEffect(() => {
+    if (dailySnapshotCheckedRef.current) return;
+    if (!initialLoadDone.current) return;
+    if ((events || []).length === 0) return; // 沒資料不拍,避免初始化前覆寫好的快照
+    dailySnapshotCheckedRef.current = true;
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      if (dailySnapshots[today]) return; // 今天已拍過
+      const totals = computeTotals(events);
+      const newSnap = {
+        time: Date.now(),
+        ...totals,
+        // 存 events + buyerNames,不存 logs(節省空間)
+        payload: { events: JSON.parse(JSON.stringify(events)), buyerNames: [...buyerNames] },
+      };
+      const merged = { ...dailySnapshots, [today]: newSnap };
+      // 只保留最近 7 天
+      const keys = Object.keys(merged).sort().reverse();
+      const trimmed = {};
+      keys.slice(0, 7).forEach(k => { trimmed[k] = merged[k]; });
+      setDailySnapshots(trimmed);
+      try { window.localStorage.setItem("tkm-v3-daily", JSON.stringify(trimmed)); }
+      catch (e) {
+        // 空間滿:嘗試只存 totals 不存 payload
+        const slim = {};
+        Object.keys(trimmed).forEach(k => {
+          const { payload, ...rest } = trimmed[k];
+          slim[k] = rest;
+        });
+        try { window.localStorage.setItem("tkm-v3-daily", JSON.stringify(slim)); } catch {}
+      }
+    } catch (e) { console.warn("Daily snapshot failed:", e); }
+  }, [events, buyerNames, dailySnapshots]);
+
   // 2) On change: save to localStorage immediately + debounced safe-save to Supabase
   useEffect(() => {
     // localStorage 寫入策略:三層降級避免 quota 滿
@@ -1288,7 +1440,7 @@ export default function App() {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1297,7 +1449,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
 
   // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
@@ -1334,7 +1486,7 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
       try {
         const newEvents = JSON.parse(e.newValue);
         if (Array.isArray(newEvents)) {
@@ -1351,7 +1503,7 @@ export default function App() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1370,7 +1522,7 @@ export default function App() {
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -1402,7 +1554,7 @@ export default function App() {
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1410,6 +1562,103 @@ export default function App() {
   const displayEvents = tab === "active" ? activeEvents : tab === "picked" ? pickedEvents : doneEvents;
   const filtered = displayEvents.filter(e => { if (!search) return true; const s = search.toLowerCase(); return e.name.toLowerCase().includes(s) || e.buyers?.some(b => b.name.toLowerCase().includes(s)); });
   const totalTickets = activeEvents.reduce((s, e) => s + (e.buyers || []).reduce((a, b) => a + buyerTotalQty(b), 0), 0);
+  // 全域總覽(包含已取票、已完成,跟每日快照比較用)
+  const allTotals = useMemo(() => computeTotals(events), [events]);
+
+  // 智能差異比對:跟最近快照逐筆比 + 用 log 解釋每個消失/減少
+  // 「有對應 log」= 你手動操作,「沒有對應 log」= 真的資料消失
+  const dataDiff = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const keys = Object.keys(dailySnapshots).sort().reverse().filter(k => k !== today);
+    if (keys.length === 0) return null;
+    const prevKey = keys[0];
+    const prev = dailySnapshots[prevKey];
+    if (!prev.payload) return { prevKey, prev, noPayload: true, alert: false };
+    const sinceTime = prev.time;
+    const logsSince = (logs || []).filter(l => l.time > sinceTime);
+
+    const prevEvents = prev.payload.events || [];
+    const prevById = new Map(prevEvents.map(e => [e.id, e]));
+    const currById = new Map((events || []).map(e => [e.id, e]));
+
+    const sumBatches = (b) => {
+      const bs = Array.isArray(b.batches) && b.batches.length > 0 ? b.batches : [{qty: b.qty || 0}];
+      return bs.reduce((s, x) => s + (x.qty || 0), 0);
+    };
+    const findLog = (predicate) => logsSince.find(l => predicate(l.msg || ""));
+
+    const eventsAdded = [];
+    const eventsRemoved = [];
+    const buyersAdded = [];
+    const buyersRemoved = [];
+    const qtyDecreases = [];
+
+    // 場次 added / removed
+    for (const [id, e] of currById) {
+      if (!prevById.has(id)) eventsAdded.push({ name: e.name, id });
+    }
+    for (const [id, e] of prevById) {
+      if (!currById.has(id)) {
+        const explanation = findLog(m => m.includes(`刪除場次【${e.name}】`));
+        eventsRemoved.push({
+          name: e.name, id,
+          buyerCount: (e.buyers || []).length,
+          qty: (e.buyers || []).reduce((s, b) => s + sumBatches(b), 0),
+          explained: !!explanation, explanation: explanation?.msg,
+        });
+      }
+    }
+
+    // 共有場次內的 buyer 跟 qty 變動
+    for (const [id, currEvt] of currById) {
+      const prevEvt = prevById.get(id);
+      if (!prevEvt) continue;
+      const prevBuyers = new Map((prevEvt.buyers || []).map(b => [b.name, b]));
+      const currBuyers = new Map((currEvt.buyers || []).map(b => [b.name, b]));
+
+      for (const [name, b] of currBuyers) {
+        if (!prevBuyers.has(name)) buyersAdded.push({ eventName: currEvt.name, buyerName: name, qty: sumBatches(b) });
+      }
+      for (const [name, b] of prevBuyers) {
+        if (!currBuyers.has(name)) {
+          const explanation = findLog(m => m.includes(`【${currEvt.name}】移除「${name}」`));
+          buyersRemoved.push({
+            eventName: currEvt.name, buyerName: name, qty: sumBatches(b),
+            explained: !!explanation, explanation: explanation?.msg,
+          });
+        }
+      }
+      // qty 減少 (增加不算「資料消失」,只追減少)
+      for (const [name, prevB] of prevBuyers) {
+        const currB = currBuyers.get(name);
+        if (!currB) continue;
+        const pq = sumBatches(prevB), cq = sumBatches(currB);
+        if (cq < pq) {
+          const explanation = findLog(m =>
+            m.includes(`【${currEvt.name}】${name}`) // 分批變更 / 新增分批 / 移除分批 都符合
+          );
+          qtyDecreases.push({
+            eventName: currEvt.name, buyerName: name, prevQty: pq, currQty: cq,
+            explained: !!explanation, explanation: explanation?.msg,
+          });
+        }
+      }
+    }
+
+    const unexplained =
+      eventsRemoved.filter(x => !x.explained).length +
+      buyersRemoved.filter(x => !x.explained).length +
+      qtyDecreases.filter(x => !x.explained).length;
+
+    return {
+      prevKey, prev, sinceTime,
+      eventsAdded, eventsRemoved, buyersAdded, buyersRemoved, qtyDecreases,
+      unexplained, alert: unexplained > 0,
+    };
+  }, [events, logs, dailySnapshots]);
+
+  // 保留舊 healthCheck 變數名給頂部 banner 用,改成 alias
+  const healthCheck = dataDiff;
   const unpaidCount = activeEvents.reduce((s, e) => s + countStatusBatches(e.buyers, "unpaid"), 0);
   const pickedRefundCount = pickedEvents.reduce((s, e) => s + countStatusBatches(e.buyers, "refund"), 0);
   const getEventName = (id) => events.find(e => e.id === id)?.name || "?";
@@ -2095,6 +2344,31 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth:900,margin:"0 auto",padding:"20px 16px" }}>
+        {/* 全域總覽 + 健康監測 (所有分頁可見) */}
+        {!showLog && (
+          <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:14,padding:"8px 14px",background:healthCheck?.alert?"#fff0eb":"#f7f3ec",borderRadius:10,border:`1px solid ${healthCheck?.alert?"#e09080":"#e4e0d8"}`,fontSize:12,flexWrap:"wrap" }}>
+            <span style={{ color:"#7a6850",fontWeight:600 }}>📊 全域總覽:</span>
+            <span style={{ color:"#2d2a26",fontWeight:700 }}>{allTotals.totalEvents} 場</span>
+            <span style={{ color:"#999" }}>·</span>
+            <span style={{ color:"#2d2a26",fontWeight:700 }}>{allTotals.totalBuyers} 訂購人</span>
+            <span style={{ color:"#999" }}>·</span>
+            <span style={{ color:"#2d2a26",fontWeight:700 }}>{allTotals.totalQty} 張</span>
+            {dataDiff && (() => {
+              const c = dataDiff;
+              if (c.noPayload) {
+                return <span style={{ marginLeft:"auto",color:"#999",fontSize:11 }}>{c.prevKey} 快照只剩數字 · 無法比對細節</span>;
+              }
+              const totalChanges = c.eventsAdded.length + c.eventsRemoved.length + c.buyersAdded.length + c.buyersRemoved.length + c.qtyDecreases.length;
+              if (totalChanges === 0) {
+                return <span style={{ marginLeft:"auto",color:"#5a7a5a",fontSize:11 }}>✓ 跟 {c.prevKey} 對得起來</span>;
+              }
+              return (<>
+                <button onClick={()=>setDataDiffModal(true)} style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:7,border:`1px solid ${c.alert?"#c47070":"#c4b89a"}`,background:c.alert?"#fff":"#fff9ec",fontSize:11,cursor:"pointer",fontWeight:700,color:c.alert?"#8b3a3a":"#7a5a30",fontFamily:"inherit" }}>🔍 查看與 {c.prevKey} 的差異 ({totalChanges})</button>
+                {c.alert && <span title={`有 ${c.unexplained} 筆資料消失但找不到對應 log,可能是同步異常!`} style={{ padding:"2px 8px",borderRadius:8,background:"#c47070",color:"#fff",fontSize:11,fontWeight:700 }}>⚠ {c.unexplained} 筆無法解釋</span>}
+              </>);
+            })()}
+          </div>
+        )}
         {/* Stats */}
         {tab==="active"&&!showLog&&(
           <div style={{ display:"flex",gap:10,marginBottom:18,flexWrap:"wrap" }}>
@@ -2191,6 +2465,43 @@ export default function App() {
               </div>
             )}
 
+            {/* 每日快照 (自動備份) */}
+            {Object.keys(dailySnapshots).length > 0 && (
+              <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden" }}>
+                <div style={{ padding:"12px 18px",borderBottom:"1px solid #f0ede8" }}>
+                  <span style={{ fontWeight:700,fontSize:14 }}>📅 每日快照</span>
+                  <span style={{ fontSize:11,color:"#999",marginLeft:8 }}>每天開 app 自動拍一張,最多保留 7 天</span>
+                </div>
+                <div>
+                  {Object.keys(dailySnapshots).sort().reverse().map(dateKey => {
+                    const ds = dailySnapshots[dateKey];
+                    const t = new Date(ds.time);
+                    const ts = `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`;
+                    return (
+                      <div key={dateKey} style={{ padding:"10px 18px",borderBottom:"1px solid #f5f3ef",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,fontSize:13,flexWrap:"wrap" }}>
+                        <div style={{ flex:1,minWidth:0 }}>
+                          <div style={{ fontWeight:700 }}>📅 {dateKey} <span style={{ color:"#999",fontSize:11,fontWeight:400 }}>· {ts} 拍</span></div>
+                          <div style={{ fontSize:11,color:"#888",marginTop:2 }}>當時:{ds.totalEvents} 場 · {ds.totalBuyers} 訂購人 · {ds.totalQty} 張</div>
+                        </div>
+                        {ds.payload ? (
+                          <button onClick={()=>setConfirmModal({
+                            msg:`確定要還原到 ${dateKey} 的快照嗎?
+
+當時:${ds.totalEvents} 場 · ${ds.totalBuyers} 訂購人 · ${ds.totalQty} 張
+
+還原後,${dateKey} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,
+                            yesLabel:"確定還原",
+                            onYes:()=>{restoreFromDaily(dateKey);setConfirmModal(null);}
+                          })} style={{ padding:"5px 14px",borderRadius:7,border:"1.5px solid #d4cdb8",background:"#faf7f0",fontSize:12,cursor:"pointer",fontWeight:700,color:"#7a5a30",fontFamily:"inherit",whiteSpace:"nowrap" }}>⟲ 還原到此</button>
+                        ) : (
+                          <span style={{ fontSize:11,color:"#bbb" }}>空間不夠 · 只剩數字</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {/* 完整紀錄按日期分組 */}
             <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden" }}>
               <div style={{ padding:"12px 18px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6 }}>
@@ -2807,6 +3118,7 @@ export default function App() {
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
+      {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
 }
