@@ -1098,14 +1098,26 @@ export default function App() {
         // 自動 merge 容易因為 base 跟 remote 等於同一值而誤判 myChanged=false,把本地的修改沖回去
         // 寧可粗暴覆蓋雲端,也不要讓使用者剛改的東西被默默還原
         if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) {
-          addLog(`🛡 偵測雲端衝突,因您 5 分鐘內動過,強制保留本地版本`, snap());
-          const fres = await saveToSupabase({ events, buyerNames, logs: slimLogsForCloud(logs) }, null, { force: true });
+          // ⚠ 不能直接呼叫 addLog,因為它會 setLogs 觸發 useEffect 重跑、再 save、再 stale、又 force,迴圈
+          // 方法:預先算好「加入保護 log 後」的未來狀態 + 未來 sig,等 force-push 成功才用 setLogs 一次寫完
+          const SNAPSHOT_KEEP_LOCAL = 10;
+          const newProtectLog = {
+            id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+            time: Date.now(),
+            msg: `🛡 偵測雲端衝突,因您 5 分鐘內動過,強制保留本地版本`,
+            snapshot: snap(),
+          };
+          const newLogs = [newProtectLog, ...logs].slice(0, 500)
+            .map((l, idx) => idx < SNAPSHOT_KEEP_LOCAL ? l : { ...l, snapshot: null });
+          const futureSig = makeSignature(events, buyerNames, newLogs);
+          const fres = await saveToSupabase({ events, buyerNames, logs: slimLogsForCloud(newLogs) }, null, { force: true });
           if (fres.ok) {
             setSyncStatus("saved");
             setLastSyncedAt(fres.updatedAt);
             lastSyncedAtRef.current = fres.updatedAt;
-            lastSavedSignature.current = currentSig;
-            updateBase({ events, buyerNames, logs });
+            lastSavedSignature.current = futureSig; // 關鍵:設成「未來 sig」,setLogs 觸發的 re-render 才不會誤判要重 save
+            updateBase({ events, buyerNames, logs: newLogs });
+            setLogs(newLogs);
           } else {
             setSyncStatus("error");
           }
