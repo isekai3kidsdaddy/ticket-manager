@@ -1,6 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { SUPABASE_READY, loadFromSupabase, saveToSupabase } from "./supabaseClient";
-import { KNOWN_BUYERS, INITIAL_EVENTS } from "./initialData";
+import * as InitData from "./initialData";
+const KNOWN_BUYERS = InitData.KNOWN_BUYERS;
+const INITIAL_EVENTS = InitData.INITIAL_EVENTS;
+// 應用名稱 — 若 initialData.js 沒匯出就用預設值「票券管家」
+const APP_TITLE = InitData.APP_TITLE || "票券管家";
+const APP_SUBTITLE = InitData.APP_SUBTITLE || "TICKET MANAGER";
 
 // ─── All unique buyer names from existing data ───
 
@@ -3131,7 +3136,7 @@ function MainApp() {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `票券管家備份_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${APP_TITLE}備份_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
   };
 
@@ -3277,10 +3282,10 @@ function MainApp() {
 
     ctx.fillStyle = "#faf9f6";
     ctx.font = `bold 24px ${F}`;
-    ctx.fillText("票券管家", PAD, 36);
+    ctx.fillText(APP_TITLE, PAD, 36);
     ctx.fillStyle = "#8b7355";
     ctx.font = `10px ${F}`;
-    ctx.fillText("TICKET MANAGER", PAD + 105, 34);
+    ctx.fillText(APP_SUBTITLE, PAD + 105, 34);
 
     const d = new Date();
     const dateStr = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
@@ -3345,10 +3350,10 @@ function MainApp() {
     ctx.fillStyle = "#b0a090";
     ctx.font = `11px ${F}`;
     ctx.textAlign = "center";
-    ctx.fillText("票券管家", W / 2, y + 14);
+    ctx.fillText(APP_TITLE, W / 2, y + 14);
     ctx.textAlign = "left";
 
-    const filename = `票券管家_進行中_${dateStr.replace(/\//g, "-")}_${timeStr.replace(":", "")}.png`;
+    const filename = `${APP_TITLE}_進行中_${dateStr.replace(/\//g, "-")}_${timeStr.replace(":", "")}.png`;
 
     try {
       canvas.toBlob((blob) => {
@@ -3361,7 +3366,7 @@ function MainApp() {
           try {
             const file = new File([blob], filename, { type: "image/png" });
             if (navigator.canShare && navigator.canShare({ files: [file] })) {
-              navigator.share({ files: [file], title: "票券管家" }).catch(() => {
+              navigator.share({ files: [file], title: APP_TITLE }).catch(() => {
                 const a = document.createElement("a");
                 a.href = URL.createObjectURL(blob);
                 a.download = filename;
@@ -3413,8 +3418,8 @@ function MainApp() {
       <div style={{ background:"#2d2a26",color:"#faf9f6",padding:"14px 20px",position:"sticky",top:0,zIndex:100,borderBottom:"3px solid #8b7355" }}>
         <div style={{ maxWidth:900,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8 }}>
           <div style={{ display:"flex",alignItems:"baseline",gap:10 }}>
-            <span style={{ fontSize:20,fontWeight:700,letterSpacing:1 }}>票券管家</span>
-            <span style={{ fontSize:11,color:"#8b7355",fontWeight:500 }}>TICKET MANAGER</span>
+            <span style={{ fontSize:20,fontWeight:700,letterSpacing:1 }}>{APP_TITLE}</span>
+            <span style={{ fontSize:11,color:"#8b7355",fontWeight:500 }}>{APP_SUBTITLE}</span>
             {SUPABASE_READY && (() => {
               const hasUnsaved = lastSavedSignature.current !== null && currentSig !== lastSavedSignature.current;
               return (
