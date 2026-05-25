@@ -266,6 +266,8 @@ function RealnameFormPage({ token }) {
   const [identities, setIdentities] = useState([]);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // 模式:"buyer" 填 identities; "identity" 填某個 identity 底下的 subItems(細項實名)
+  const [mode, setMode] = useState("buyer");
 
   useEffect(() => { loadByToken(); /* eslint-disable-next-line */ }, [token]);
 
@@ -277,27 +279,51 @@ function RealnameFormPage({ token }) {
       const res = await loadFromSupabase();
       if (!res || !res.payload) throw new Error("無法載入資料");
       const events = res.payload.events || [];
-      let foundEvent = null, foundBuyer = null;
+      let foundEvent = null, foundBuyer = null, foundIdentity = null;
+      // 先找 buyer-level token,再找 identity-level token
       for (const evt of events) {
         for (const b of (evt.buyers || [])) {
           if (b.realnameToken === token) { foundEvent = evt; foundBuyer = b; break; }
+          for (const it of (b.identities || [])) {
+            if (it.realnameToken === token) { foundEvent = evt; foundBuyer = b; foundIdentity = it; break; }
+          }
+          if (foundBuyer) break;
         }
         if (foundBuyer) break;
       }
       if (!foundBuyer) { setError("連結無效或已被刪除"); setLoading(false); return; }
-      // 計算 buyer 總張數
-      const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
-      setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly: foundEvent.tixOnly !== false });
-      // 預填現有 identities,沒有的話建 N 個空白
-      const existing = foundBuyer.identities || [];
-      if (existing.length > 0) {
-        setIdentities(existing.map(it => ({ ...it })));
-      } else {
-        const blanks = [];
-        for (let i = 0; i < totalQty; i++) {
-          blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+
+      const tixOnly = foundEvent.tixOnly !== false;
+      if (foundIdentity) {
+        // identity-level token:填細項實名 (subItems)
+        setMode("identity");
+        const totalQty = foundIdentity.qty || 1;
+        setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, identityName: foundIdentity.name, totalQty, tixOnly });
+        const existing = foundIdentity.subItems || [];
+        if (existing.length > 0) {
+          setIdentities(existing.map(it => ({ ...it })));
+        } else {
+          const blanks = [];
+          for (let i = 0; i < totalQty; i++) {
+            blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+          }
+          setIdentities(blanks);
         }
-        setIdentities(blanks);
+      } else {
+        // buyer-level token (現有行為):填 identities
+        setMode("buyer");
+        const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
+        setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly });
+        const existing = foundBuyer.identities || [];
+        if (existing.length > 0) {
+          setIdentities(existing.map(it => ({ ...it })));
+        } else {
+          const blanks = [];
+          for (let i = 0; i < totalQty; i++) {
+            blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+          }
+          setIdentities(blanks);
+        }
       }
     } catch (e) {
       setError("載入失敗: " + (e.message || "未知錯誤"));
@@ -316,7 +342,7 @@ function RealnameFormPage({ token }) {
     setIdentities(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev);
   };
 
-  // 計算總張數 (識別跟 buyer 訂購的不符會警告)
+  // 計算總張數
   const totalQtySum = identities.reduce((s, it) => s + (parseInt(it.qty)||1), 0);
   const expectedQty = eventInfo?.totalQty || 0;
 
@@ -327,13 +353,7 @@ function RealnameFormPage({ token }) {
       const fresh = await loadFromSupabase();
       if (!fresh || !fresh.payload) throw new Error("無法載入");
       const freshEvents = fresh.payload.events || [];
-      let eIdx = -1, bIdx = -1;
-      for (let i = 0; i < freshEvents.length; i++) {
-        const j = (freshEvents[i].buyers || []).findIndex(b => b.realnameToken === token);
-        if (j >= 0) { eIdx = i; bIdx = j; break; }
-      }
-      if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
-      const submittedIdentities = identities.map(it => ({
+      const submitted = identities.map(it => ({
         ...it,
         name: (it.name||"").trim(),
         idNumber: (it.idNumber||"").trim().toUpperCase(),
@@ -342,16 +362,54 @@ function RealnameFormPage({ token }) {
         memberNo: (it.memberNo||"").trim(),
         qty: parseInt(it.qty)||1,
       }));
-      const newEvents = freshEvents.map((evt, i) => {
-        if (i !== eIdx) return evt;
-        return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submittedIdentities, needRealName: true }) };
-      });
-      const submitLog = {
-        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
-        time: Date.now(),
-        msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submittedIdentities.length} 筆`,
-        snapshot: null,
-      };
+      let newEvents, submitLog;
+      if (mode === "identity") {
+        // 找 (eIdx, bIdx, identityId) 並更新 subItems
+        let eIdx = -1, bIdx = -1, identityId = null;
+        for (let i = 0; i < freshEvents.length; i++) {
+          const bs = freshEvents[i].buyers || [];
+          for (let j = 0; j < bs.length; j++) {
+            const it = (bs[j].identities || []).find(x => x.realnameToken === token);
+            if (it) { eIdx = i; bIdx = j; identityId = it.id; break; }
+          }
+          if (eIdx >= 0) break;
+        }
+        if (eIdx < 0 || !identityId) { setError("連結已失效"); setSaving(false); return; }
+        newEvents = freshEvents.map((evt, i) => {
+          if (i !== eIdx) return evt;
+          return { ...evt, buyers: (evt.buyers||[]).map((b, j) => {
+            if (j !== bIdx) return b;
+            return { ...b, identities: (b.identities || []).map(it => it.id !== identityId ? it : { ...it, subItems: submitted }) };
+          }) };
+        });
+        const evName = freshEvents[eIdx].name;
+        const buyerName = freshEvents[eIdx].buyers[bIdx].name;
+        const identityName = freshEvents[eIdx].buyers[bIdx].identities.find(it => it.id === identityId)?.name || "";
+        submitLog = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          time: Date.now(),
+          msg: `📩 【${evName}】${buyerName} → ${identityName} 透過實名連結提交 ${submitted.length} 筆細項實名`,
+          snapshot: null,
+        };
+      } else {
+        // buyer mode (現有)
+        let eIdx = -1, bIdx = -1;
+        for (let i = 0; i < freshEvents.length; i++) {
+          const j = (freshEvents[i].buyers || []).findIndex(b => b.realnameToken === token);
+          if (j >= 0) { eIdx = i; bIdx = j; break; }
+        }
+        if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
+        newEvents = freshEvents.map((evt, i) => {
+          if (i !== eIdx) return evt;
+          return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submitted, needRealName: true }) };
+        });
+        submitLog = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          time: Date.now(),
+          msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submitted.length} 筆`,
+          snapshot: null,
+        };
+      }
       const newLogs = [submitLog, ...(fresh.payload.logs || [])].slice(0, 500);
       const newPayload = { ...fresh.payload, events: newEvents, buyerNames: fresh.payload.buyerNames || [], logs: newLogs };
       const result = await saveToSupabase(newPayload, fresh.updatedAt);
@@ -394,10 +452,19 @@ function RealnameFormPage({ token }) {
     <div style={{ minHeight:"100vh",background:"#faf7f0",padding:"20px 14px 60px",fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
       <div style={{ maxWidth:480,margin:"0 auto" }}>
         <div style={{ background:"#fff",padding:"18px 18px 14px",borderRadius:12,marginBottom:14,boxShadow:"0 2px 10px rgba(0,0,0,.04)" }}>
-          <div style={{ fontSize:11,color:"#888",letterSpacing:1,marginBottom:4 }}>票券實名制資料填寫</div>
+          <div style={{ fontSize:11,color:"#888",letterSpacing:1,marginBottom:4 }}>{mode === "identity" ? "細項實名資料填寫" : "票券實名制資料填寫"}</div>
           <h1 style={{ margin:"0 0 10px",fontSize:18,fontWeight:700,color:"#2d2a26",lineHeight:1.3 }}>{eventInfo.eventName}</h1>
-          <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.buyerName}</b>,共 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
-          <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫實名資料,送出後會自動儲存。本連結可重複進入修改。</div>
+          {mode === "identity" ? (
+            <>
+              <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.identityName}</b>,您透過 <b style={{color:"#888"}}>{eventInfo.buyerName}</b> 訂了 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
+              <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫每位實名人資料(共 {eventInfo.totalQty} 張需要填),送出後會自動儲存。本連結可重複進入修改。</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.buyerName}</b>,共 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
+              <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫實名資料,送出後會自動儲存。本連結可重複進入修改。</div>
+            </>
+          )}
         </div>
 
         {identities.map((it, idx) => (
@@ -528,6 +595,63 @@ ${url}
   );
 }
 
+// ─── 識別人(代購層) 細項實名連結 Modal ───
+function IdentityRealnameLinkModal({ event, buyer, identity, onClose, onRegenerate }) {
+  const [copied, setCopied] = useState(null);
+  const url = typeof window !== "undefined"
+    ? `${window.location.origin}${window.location.pathname}?fill=${identity.realnameToken}`
+    : `?fill=${identity.realnameToken}`;
+  const identityQty = identity.qty || 1;
+  const lineMsg = `Hi ${identity.name||"代購"},您透過 ${buyer.name} 訂的「${event.name}」共 ${identityQty} 張票,請點下方連結填寫實名資料:
+${url}
+
+填寫完即可關閉,資料會自動同步。`;
+
+  const copyText = async (text, key) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key); setTimeout(()=>setCopied(null), 2000);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); setCopied(key); setTimeout(()=>setCopied(null), 2000); } catch {}
+      document.body.removeChild(ta);
+    }
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:14,padding:"20px 22px",width:"100%",maxWidth:520,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>🔗 細項實名連結 — {identity.name||"(未命名)"}</h3>
+        <div style={{ fontSize:12,color:"#888",marginBottom:14 }}>{event.name} · 透過 {buyer.name} · 共 {identityQty} 張</div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>專屬連結 — 只傳給代購本人 ({identity.name||"未命名"})</div>
+        <div style={{ display:"flex",gap:6,marginBottom:12 }}>
+          <input readOnly value={url} onFocus={e=>e.target.select()} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"ui-monospace, monospace",background:"#faf9f6",color:"#555" }}/>
+          <button onClick={()=>copyText(url, "url")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="url"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap" }}>{copied==="url"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>建議 LINE 訊息(含連結)</div>
+        <div style={{ display:"flex",gap:6,marginBottom:14 }}>
+          <textarea readOnly value={lineMsg} onFocus={e=>e.target.select()} rows={4} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6",color:"#555",resize:"vertical" }}/>
+          <button onClick={()=>copyText(lineMsg, "msg")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="msg"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start" }}>{copied==="msg"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:7,padding:"8px 12px",fontSize:11,color:"#7a6028",marginBottom:14,lineHeight:1.6 }}>
+          ⚠ 此連結是 <b>{identity.name||"代購"}</b> 專屬,請勿傳給其他代購<br/>
+          ✓ 代購可填 {identityQty} 筆細項實名(他底下的客人姓名/身分證/電話...),填完自動同步<br/>
+          🔒 此連結只能編輯 {identity.name||"此代購"} 自己的細項,看不到其他代購的資料
+        </div>
+
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
+          <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+          <button onClick={onClose} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>完成</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 批次匯入實名 — 解析 helpers ───
 const normalizePhoneForImport = (raw) => {
   if (raw === undefined || raw === null) return "";
@@ -560,6 +684,8 @@ const LINE_FIELD_MAP = {
   "拓元帳號": "tixAccount", "拓元": "tixAccount", "帳號": "tixAccount", "Email": "tixAccount", "email": "tixAccount",
   "登入方式": "loginVia", "登入": "loginVia",
   "拿幾張": "qty", "幾張": "qty", "張數": "qty", "數量": "qty", "票數": "qty",
+  "代購": "agent", "識別人": "agent", "上層": "agent", "上層代購": "agent", "屬於": "agent",
+  "來自": "agentSupplier", "來源": "agentSupplier", "上游": "agentSupplier", "由誰提供": "agentSupplier",
 };
 const parseLineBlocks = (rawText) => {
   // 用空行分割多個人,每個 block 內依 「key: value」或「key:value」抓取
@@ -581,6 +707,8 @@ const parseLineBlocks = (rawText) => {
         idx: rows.length,
         raw: block.trim(),
         buyer: "", // 訂購人在 LINE 訊息裡通常沒有,由「預設訂購人」補
+        agent: (person.agent || "").trim(), // 代購 (identity 層名),若有則此 row 變成 subItem
+        agentSupplier: (person.agentSupplier || "").trim(), // 指定要塞到哪個 supplier 的代購(同名代購有多個時用)
         name: person.name,
         qty: normalizeQtyForImport(person.qty),
         phone: normalizePhoneForImport(person.phone || ""),
@@ -594,20 +722,20 @@ const parseLineBlocks = (rawText) => {
   return rows;
 };
 // 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」
-const parseImportRows = (rawText, defaultBuyer = "") => {
+const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
   if (!rawText || !rawText.trim()) return { rows: [], hasHeader: false, format: "tsv" };
   // 偵測 LINE 格式:文字裡含「姓名:」或「姓名:」就當 LINE 原文解析
   const isLineFormat = /(^|\n)\s*姓名\s*[:：]/.test(rawText);
   if (isLineFormat) {
     const rows = parseLineBlocks(rawText);
-    // 預設訂購人套用到每一列
-    const applied = rows.map(r => ({ ...r, buyer: defaultBuyer.trim() || r.buyer }));
+    // 預設訂購人/代購套用到每一列(已填的不蓋過)
+    const applied = rows.map(r => ({ ...r, buyer: r.buyer || defaultBuyer.trim(), agent: r.agent || defaultAgent.trim() }));
     return { rows: applied, hasHeader: false, format: "line" };
   }
   // 否則走原本 TSV 解析
   const lines = String(rawText).split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
   if (lines.length === 0) return { rows: [], hasHeader: false, format: "tsv" };
-  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖"];
+  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖","代購","識別人","來自","來源","上游"];
   const firstCells = lines[0].split("\t");
   const hasHeader = firstCells.some(c => HEADER_KEYWORDS.some(k => c.includes(k)));
   let columnMap, dataLines;
@@ -616,6 +744,8 @@ const parseImportRows = (rawText, defaultBuyer = "") => {
     firstCells.forEach((cell, i) => {
       const c = cell.trim();
       if (c.includes("訂購人")) columnMap.buyer = i;
+      else if (c.includes("代購") || c.includes("識別人") || (c.includes("上層") && !c.includes("上游"))) columnMap.agent = i;
+      else if (c.includes("來自") || c.includes("來源") || c.includes("上游")) columnMap.agentSupplier = i;
       else if (c.includes("姓名")) columnMap.name = i;
       else if (c.includes("拿幾張") || c === "張數") columnMap.qty = i;
       else if (c.includes("電話") || c.includes("手機")) columnMap.phone = i;
@@ -633,10 +763,14 @@ const parseImportRows = (rawText, defaultBuyer = "") => {
     const cells = line.split("\t");
     const get = (k) => columnMap[k] !== undefined ? (cells[columnMap[k]] || "") : "";
     const rawBuyer = get("buyer").trim();
+    const rawAgent = columnMap.agent !== undefined ? get("agent").trim() : "";
+    const rawAgentSup = columnMap.agentSupplier !== undefined ? get("agentSupplier").trim() : "";
     return {
       idx,
       raw: line,
-      buyer: rawBuyer || defaultBuyer.trim(), // 沒填的話用預設
+      buyer: rawBuyer || defaultBuyer.trim(),
+      agent: rawAgent || defaultAgent.trim(),
+      agentSupplier: rawAgentSup,
       name: get("name").trim(),
       qty: normalizeQtyForImport(get("qty")),
       phone: normalizePhoneForImport(get("phone")),
@@ -657,6 +791,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const [newBuyerNames, setNewBuyerNames] = useState({}); // rowIdx -> 新訂購人名(顯示輸入框時用)
   const [skipped, setSkipped] = useState({}); // rowIdx -> bool
   const [defaultBuyer, setDefaultBuyer] = useState(""); // 預設訂購人(LINE 原文無訂購人欄時必填)
+  const [defaultAgent, setDefaultAgent] = useState(""); // 預設代購(識別人層) — 若填,匯入時整批變成這個代購底下的「細項實名」
 
   useEffect(() => {
     const h = (e) => { if (e.key === "Escape") onClose(); };
@@ -676,7 +811,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const modalMaxHeight = `${Math.floor(88 / zoomFactor)}vh`;
 
   const doParse = () => {
-    const result = parseImportRows(rawText, defaultBuyer);
+    const result = parseImportRows(rawText, defaultBuyer, defaultAgent);
     setParsed(result);
     setAssignments({});
     setNewBuyerNames({});
@@ -744,6 +879,8 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
       if (!additions[buyerKey]) additions[buyerKey] = [];
       additions[buyerKey].push({
         id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_${r.idx}`,
+        agent: (r.agent || "").trim(), // 若非空,此筆變成 agent 識別人底下的 subItem;空則照舊變 identity
+        agentSupplier: (r.agentSupplier || "").trim(), // 若非空,優先塞到對應 supplier 的代購
         name: r.name,
         phone: r.phone,
         idNumber: r.idNumber,
@@ -766,9 +903,9 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
         </div>
         <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.6 }}>
           支援兩種格式 — 自動偵測:<br/>
-          <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位順序「訂購人/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
-          <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / 身分證:...」格式,多人用空行分隔<br/>
-          智能修補:電話砍 0、登入方式 FB/Google/臉書/谷歌都認得
+          <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位「訂購人/<span style={{color:"#b8531a"}}>代購</span>/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
+          <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / <span style={{color:"#b8531a"}}>代購:</span> / 身分證:...」,多人空行分隔<br/>
+          智能修補:電話砍 0、登入方式 FB/Google 都認得 · <b style={{color:"#b8531a"}}>「代購」欄填的話 → 該筆變成「細項實名」放在識別人底下</b>
         </div>
         <div style={{ background:"#f7f3ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,color:"#7a6850" }}>
           此場目前訂購人 ({buyerNamesList.length}):{buyerNamesList.length>0?buyerNamesList.join(", "):"(無)"}
@@ -776,12 +913,17 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
 
         {!parsed ? (
           <>
-            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8 }}>
+            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap" }}>
               <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設訂購人:</span>
-              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="LINE 原文沒帶訂購人 → 整批套用這個名字(如「阿文」)" style={{ flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
+              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="整批套用這個訂購人(如「妙」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
               <datalist id="batch-import-buyer-list">
                 {buyerNamesList.map(n => <option key={n} value={n}/>)}
               </datalist>
+            </div>
+            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap" }}>
+              <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設代購:</span>
+              <input value={defaultAgent} onChange={e=>setDefaultAgent(e.target.value)} placeholder="(選填)整批變成 XX 識別人底下的細項實名(如「萬陽」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }}/>
+              <span style={{ fontSize:10,color:"#aaa" }} title="不填 = 每筆變成識別人;填了 = 每筆變成這個識別人底下的細項實名">ⓘ</span>
             </div>
             <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="貼 Google Sheet 整批 row,或直接貼 LINE 訊息 (姓名: / 電話: / 身分證:... 多人用空行分隔)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
             <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
@@ -821,6 +963,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                       <span style={{ fontSize:13,fontWeight:700,minWidth:80 }}>
                         {r.matched ? r.matched.name : (r.willCreateNewBuyer ? `${r.targetBuyerName} ✨新` : (r.buyer || "(無)"))}
                       </span>
+                      {r.agent && <span style={{ fontSize:11,color:"#b8531a",fontWeight:700,padding:"1px 6px",background:"#fff5ea",borderRadius:5 }}>↳ {r.agent}</span>}
                       <span style={{ fontSize:12,color:"#888" }}>→</span>
                       <span style={{ fontSize:12,color:"#444" }}>
                         {r.name||<span style={{color:"#c47070"}}>(缺姓名)</span>}
@@ -1171,7 +1314,22 @@ function IdentityExportModal({ events, title, onClose }) {
 function MainApp() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
+
+  // 自動偵測「4 層 mode」— 若資料中任一識別人有 subItems / realnameToken / supplier → 啟用上游/代購完整 UI
+  // 否則回到簡單版面(3 層:Event → Buyer → Identity 作為實名人)
+  const is4LayerMode = useMemo(() => {
+    return (events || []).some(evt =>
+      (evt.buyers || []).some(b =>
+        (b.identities || []).some(it =>
+          (Array.isArray(it.subItems) && it.subItems.length > 0) ||
+          (it.realnameToken && it.realnameToken.length > 0) ||
+          (it.supplier && it.supplier.length > 0)
+        )
+      )
+    );
+  }, [events]);
   const [tab, setTab] = useState("active");
+  const [orderLogSupplierFilter, setOrderLogSupplierFilter] = useState("all"); // "all" | supplier name
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [showAddEvent, setShowAddEvent] = useState(false);
@@ -1224,6 +1382,48 @@ function MainApp() {
       }
     });
   };
+
+  // ─── 識別人 (代購層) 的細項實名連結 ───
+  const [identityLinkModal, setIdentityLinkModal] = useState(null); // { eventId, buyerIdx, identityId }
+  const openIdentityRealnameLink = (eventId, buyerIdx, identityId) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    const it = b?.identities?.find(x => x.id === identityId);
+    if (!evt || !b || !it) return;
+    if (!it.realnameToken) {
+      const token = generateRealnameToken();
+      updateEvent(eventId, e => {
+        e.buyers[buyerIdx] = {
+          ...e.buyers[buyerIdx],
+          identities: e.buyers[buyerIdx].identities.map(x => x.id === identityId ? { ...x, realnameToken: token } : x),
+        };
+        return e;
+      });
+      addLog(`【${evt.name}】${b.name} → 產生「${it.name||"(未命名)"}」的細項實名連結`, snap());
+    }
+    setIdentityLinkModal({ eventId, buyerIdx, identityId });
+  };
+  const regenerateIdentityRealnameLink = (eventId, buyerIdx, identityId) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    const it = b?.identities?.find(x => x.id === identityId);
+    if (!evt || !b || !it) return;
+    setConfirmModal({
+      msg: `確定要重新產生「${it.name||"(未命名)"}」的細項實名連結嗎?\n\n舊連結會立刻失效。`,
+      onYes: () => {
+        const newToken = generateRealnameToken();
+        updateEvent(eventId, e => {
+          e.buyers[buyerIdx] = {
+            ...e.buyers[buyerIdx],
+            identities: e.buyers[buyerIdx].identities.map(x => x.id === identityId ? { ...x, realnameToken: newToken } : x),
+          };
+          return e;
+        });
+        addLog(`【${evt.name}】${b.name} → 重新產生「${it.name||""}」的細項實名連結(舊連結作廢)`, snap());
+        setConfirmModal(null);
+      }
+    });
+  };
   const [buyerExportModal, setBuyerExportModal] = useState(null); // { buyers: [...], title }
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
@@ -1232,6 +1432,7 @@ function MainApp() {
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
+  const [expandedSubItem, setExpandedSubItem] = useState(null); // subItem key
   const [editingCatalogKey, setEditingCatalogKey] = useState(null); // 實名簿正在編輯的 key
   const [timelineFilter, setTimelineFilter] = useState(null); // null = 全部, 否則為 kind 名稱
   const fileInputRef = useRef(null);
@@ -2255,7 +2456,7 @@ function MainApp() {
     const map = new Map();
     events.forEach(evt => {
       (evt.buyers || []).forEach(b => {
-        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0 });
+        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0, supplierTotals: {} });
         const entry = map.get(b.name);
         const bs = getBatches(b);
         entry.orders.push({ eventId: evt.id, eventName: evt.name, eventStatus: evt.status, eventPrice: evt.price, qty: buyerTotalQty(b), batches: bs, note: b.note, addedAt: b.addedAt });
@@ -2265,6 +2466,12 @@ function MainApp() {
           if (x.st === "refund") entry.refundCount += 1;
           if (x.st === "refunded") entry.refundedCount += 1;
           if (x.st === "picked") entry.pickedQty += x.qty;
+          // 累計每個上游的張數
+          const m = (x.detail || "").match(/([^\s·]+?)供/);
+          if (m) {
+            const sup = m[1];
+            entry.supplierTotals[sup] = (entry.supplierTotals[sup] || 0) + (x.qty || 0);
+          }
         });
       });
     });
@@ -2375,22 +2582,47 @@ function MainApp() {
     }));
   };
 
-  // Order log data: 把所有 batch 依「訂購日期」分組,給「📅 訂購日曆」分頁用
-  // 日期來源優先順序:1) batch.addedAt (新建的批次) 2) buyer.addedAt (舊資料 fallback)
+  // Order log data: 把所有 batch (買家批次 + 上游進貨批次) 依「訂購日期」分組,給「📅 訂購日曆」分頁用
+  // 來源:
+  //   1) 上游進貨 (event.supplierBatches) — 從 Excel 匯入,供應商何時送票來
+  //   2) 買家批次 (buyer.batches[].addedAt) — 客戶何時下單/分批
   const orderLogData = useMemo(() => {
-    const byDate = new Map(); // dateKey -> [{eventName, eventId, eventStatus, buyerName, buyerIdx, qty, st, detail, ts}]
+    const byDate = new Map();
     (events || []).forEach(evt => {
+      // 上游進貨批次
+      (evt.supplierBatches || []).forEach((sb, sbi) => {
+        const ts = sb.addedAt || (sb.date ? new Date(sb.date + "T00:00:00").getTime() : null);
+        if (!ts) return;
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return;
+        const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+        if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+        byDate.get(dateKey).push({
+          source: "supplier",
+          eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
+          supplier: sb.supplier || "",
+          buyerName: sb.supplier || "上游", buyerIdx: -1, batchIdx: sbi,
+          qty: sb.qty, st: sb.st || "normal", detail: "上游進貨", ts,
+        });
+      });
+      // 買家批次
       (evt.buyers || []).forEach((b, bi) => {
         const batches = getBatches(b);
         batches.forEach((bt, bti) => {
           const ts = bt.addedAt || b.addedAt || null;
-          if (!ts) return; // 沒時間戳就跳過 (避免錯誤分組)
+          if (!ts) return;
           const d = new Date(ts);
           if (isNaN(d.getTime())) return;
           const dateKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
           if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+          // 從 detail 抓上游名字 (例:「君儀姐供」/「待退費 · 佩盈姐供」)
+          let supplier = "";
+          const supMatch = (bt.detail || "").match(/([^\s·]+?)供/);
+          if (supMatch) supplier = supMatch[1];
           byDate.get(dateKey).push({
+            source: "buyer",
             eventName: evt.name, eventId: evt.id, eventStatus: evt.status,
+            supplier,
             buyerName: b.name, buyerIdx: bi, batchIdx: bti,
             qty: bt.qty, st: bt.st, detail: bt.detail || "", ts
           });
@@ -2404,6 +2636,8 @@ function MainApp() {
         date,
         items: items.sort((a, b) => b.ts - a.ts),
         totalQty: items.reduce((s, x) => s + (x.qty || 0), 0),
+        supplierQty: items.filter(x => x.source === "supplier").reduce((s, x) => s + (x.qty || 0), 0),
+        buyerQty: items.filter(x => x.source === "buyer").reduce((s, x) => s + (x.qty || 0), 0),
       }));
   }, [events]);
 
@@ -2506,29 +2740,34 @@ function MainApp() {
   const addIdentity = (eventId, idx) => {
     const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
     if (!b) return;
-    addLog(`【${evt.name}】${b.name}:新增一筆實名資料`, snap());
+    addLog(`【${evt.name}】${b.name}:新增一筆代購`, snap());
     updateEvent(eventId, e => {
       const list = Array.isArray(e.buyers[idx].identities) ? [...e.buyers[idx].identities] : [];
-      list.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
-      e.buyers[idx] = { ...e.buyers[idx], identities: list, needRealName: true };
+      list.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", qty:1, subItems: [] });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list }; // 不自動勾「需要實名」— 代購跟實名是獨立概念
       return e;
     });
   };
-  // 批次匯入實名:additionsByBuyer = { 訂購人名: [identity, ...] }
-  // 找不到的訂購人會自動新增,找到的會把實名 append 到該 buyer 的 identities
+  // 批次匯入實名:additionsByBuyer = { 訂購人名: [identityOrSubItem, ...] }
+  // 智慧分配:
+  //   - 帶 agent 欄 → subItem 找對應代購名
+  //     · 同名代購有多筆(不同 supplier) → 依序填,每個填滿就跳下一個
+  //     · 帶 agentSupplier 欄 → 優先填對應 supplier 的代購
+  //   - 不帶 agent → 變成新代購(沒 supplier)
+  //   - ⚠ 不自動勾「需要實名」 — 代購跟實名是獨立概念
   const bulkImportIdentities = (eventId, additionsByBuyer) => {
     const evt = events.find(e => e.id === eventId);
     if (!evt) return { created: 0, addedTo: 0, identities: 0 };
-    const totalIdentities = Object.values(additionsByBuyer).reduce((s, arr) => s + arr.length, 0);
+    const totalRows = Object.values(additionsByBuyer).reduce((s, arr) => s + arr.length, 0);
     const buyerNamesCount = Object.keys(additionsByBuyer).length;
-    addLog(`📥 批次匯入 ${totalIdentities} 筆實名到【${evt.name}】(${buyerNamesCount} 個訂購人)`, snap());
+    addLog(`📥 批次匯入 ${totalRows} 筆實名到【${evt.name}】(${buyerNamesCount} 個訂購人)`, snap());
     updateEvent(eventId, e => {
-      Object.entries(additionsByBuyer).forEach(([buyerName, newIds]) => {
-        if (!newIds || newIds.length === 0) return;
+      Object.entries(additionsByBuyer).forEach(([buyerName, newRows]) => {
+        if (!newRows || newRows.length === 0) return;
         let bIdx = e.buyers.findIndex(b => (b.name||"").trim().toLowerCase() === buyerName.trim().toLowerCase());
         if (bIdx < 0) {
-          // 新增訂購人,張數預設等於這次匯入的實名總張數
-          const totalQ = newIds.reduce((s, n) => s + (n.qty||1), 0);
+          // 新增訂購人,張數預設等於這次匯入的總張數
+          const totalQ = newRows.reduce((s, n) => s + (n.qty||1), 0);
           e.buyers.push({
             name: buyerName,
             qty: totalQ,
@@ -2539,10 +2778,61 @@ function MainApp() {
           bIdx = e.buyers.length - 1;
         }
         const existing = e.buyers[bIdx].identities || [];
+        const updatedIdentities = [...existing];
+
+        // 分流:有 agent 的去 subItem,沒 agent 的當代購本身
+        newRows.forEach(row => {
+          const { agent, agentSupplier, ...identityFields } = row;
+          if (agent && agent.trim()) {
+            const agentName = agent.trim();
+            const desiredSup = (agentSupplier || "").trim();
+            // 找所有同名代購
+            const candidates = [];
+            updatedIdentities.forEach((it, idx) => {
+              if ((it.name||"").trim().toLowerCase() === agentName.toLowerCase()) candidates.push(idx);
+            });
+            // 1. 若有指定 agentSupplier,先過濾出 supplier 對應的
+            let pickedIdx = -1;
+            if (desiredSup) {
+              for (const i of candidates) {
+                if ((updatedIdentities[i].supplier||"").toLowerCase() === desiredSup.toLowerCase()) {
+                  pickedIdx = i; break;
+                }
+              }
+            }
+            // 2. 否則自動依序找第一個還有空位的代購
+            if (pickedIdx < 0) {
+              const rowQ = identityFields.qty || 1;
+              for (const i of candidates) {
+                const tgt = updatedIdentities[i];
+                const curSub = (tgt.subItems||[]).reduce((s,si)=>s+(si.qty||1),0);
+                const cap = tgt.qty || 1;
+                if (curSub + rowQ <= cap) { pickedIdx = i; break; }
+              }
+              // 3. 全滿就放最後一個(overflow)
+              if (pickedIdx < 0 && candidates.length > 0) pickedIdx = candidates[candidates.length - 1];
+            }
+            // 4. 都沒對應代購就建一個新的
+            if (pickedIdx < 0) {
+              updatedIdentities.push({
+                id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_a`,
+                name: agentName,
+                supplier: desiredSup || "",
+                qty: identityFields.qty || 1,
+                subItems: [identityFields],
+              });
+            } else {
+              const tgt = updatedIdentities[pickedIdx];
+              updatedIdentities[pickedIdx] = { ...tgt, subItems: [...(tgt.subItems||[]), identityFields] };
+            }
+          } else {
+            updatedIdentities.push({ ...identityFields, subItems: [] });
+          }
+        });
         e.buyers[bIdx] = {
           ...e.buyers[bIdx],
-          identities: [...existing, ...newIds],
-          needRealName: true,
+          identities: updatedIdentities,
+          // ⚠ 不再自動設 needRealName — 代購跟實名獨立
         };
       });
       return e;
@@ -2569,6 +2859,53 @@ function MainApp() {
       setConfirmModal(null);
     } });
   };
+
+  // ─── 細項實名(SubItems): 識別人底下再一層,給「上游」角色用 ───
+  // 範例:妙(buyer,90張) → 萬陽(identity, 48張) → 萬陽底下的 48 個真實實名人(subItems)
+  const addSubItem = (eventId, idx, identityId) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const it = (b.identities || []).find(x => x.id === identityId);
+    addLog(`【${evt.name}】${b.name} → ${it?.name || ""}:新增細項實名`, snap());
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        const subs = Array.isArray(it.subItems) ? [...it.subItems] : [];
+        subs.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+        return { ...it, subItems: subs };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  const updateSubItem = (eventId, idx, identityId, subId, updates) => {
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        const subs = (it.subItems || []).map(si => si.id === subId ? { ...si, ...updates } : si);
+        return { ...it, subItems: subs };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  const removeSubItem = (eventId, idx, identityId, subId) => {
+    const evt = events.find(e => e.id === eventId); const b = evt?.buyers?.[idx];
+    if (!b) return;
+    const it = (b.identities || []).find(x => x.id === identityId);
+    const si = (it?.subItems || []).find(x => x.id === subId);
+    addLog(`【${evt.name}】${b.name} → ${it?.name || ""}:移除細項實名 ${si?.name || ""}`, snap());
+    updateEvent(eventId, e => {
+      const list = (e.buyers[idx].identities || []).map(it => {
+        if (it.id !== identityId) return it;
+        return { ...it, subItems: (it.subItems || []).filter(si => si.id !== subId) };
+      });
+      e.buyers[idx] = { ...e.buyers[idx], identities: list };
+      return e;
+    });
+  };
+  // helper:某 identity 已收的細項實名總張數
+  const getSubItemQty = (it) => (it?.subItems || []).reduce((s, si) => s + (parseInt(si.qty) || 1), 0);
 
   const migrateBuyer = (b) => {
     if (Array.isArray(b.batches) && b.batches.length > 0) return b;
@@ -3298,6 +3635,24 @@ function MainApp() {
                       <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                         <span style={{ fontWeight:700,fontSize:14,minWidth:70,color:scMain.color }}>{b.name}</span>
                         <span style={{ fontSize:13,fontWeight:700,color:"#555" }}>共 {totalQ} 張</span>
+                        {(() => {
+                          // 上游分流:依 batch.detail 抓「X供」分組
+                          const supTotals = {};
+                          batches.forEach(bt => {
+                            const m = (bt.detail || "").match(/([^\s·]+?)供/);
+                            const sup = m ? m[1] : null;
+                            if (sup) supTotals[sup] = (supTotals[sup] || 0) + (bt.qty || 0);
+                          });
+                          const ents = Object.entries(supTotals);
+                          if (ents.length === 0) return null;
+                          return (
+                            <span style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0" }}>
+                              {ents.map(([s,q],j) => (
+                                <span key={s}>{j>0 && <span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>
+                              ))}
+                            </span>
+                          );
+                        })()}
                         {b.note&&<span style={{ fontSize:11,color:"#999",marginLeft:4 }}>({b.note})</span>}
                         <div style={{ marginLeft:"auto",display:"flex",gap:4 }}>
                           <button onClick={()=>{setAddingBatch({eventId:evt.id,idx:i});setEditingBatch(null);}} title="新增分批（例如一部分已取票、一部分待退費）" style={{ padding:"3px 10px",borderRadius:7,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 分批</button>
@@ -3354,8 +3709,8 @@ function MainApp() {
                         })()}
                       </div>
 
-                      {/* 實名資料清單（多筆）*/}
-                      {(b.needRealName || (b.identities && b.identities.length > 0)) && (() => {
+                      {/* 代購清單（永遠顯示,不論是否需要實名）*/}
+                      {(() => {
                         const idCount = (b.identities || []).length;
                         const idQty = (b.identities || []).reduce((s,x)=>s+(x.qty||1),0);
                         const diff = idQty - totalQ;
@@ -3365,7 +3720,7 @@ function MainApp() {
                         <div style={{ marginTop:8,padding:"8px 10px",background:"rgba(255,255,255,.55)",borderRadius:8,border:"1px dashed #d4cdb8" }}>
                           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
-                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 實名資料 {idCount} 筆 ({idQty} / {totalQ} 張)</span>
+                              <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>👥 代購 {idCount} 人 {idCount > 0 ? `(${idQty} / ${totalQ} 張)` : ""}</span>
                               {idCount > 0 && (
                                 matches
                                   ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數相符</span>
@@ -3374,38 +3729,157 @@ function MainApp() {
                                     : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {diff} 張</span>
                               )}
                             </div>
-                            <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增一筆</button>
+                            <button onClick={()=>addIdentity(evt.id,i)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增代購</button>
                           </div>
                           {(!b.identities || b.identities.length === 0) && (
-                            <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有實名資料</div>
+                            <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有代購 — 點「＋ 新增代購」加,或用「📥 批次匯入實名」</div>
                           )}
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
                             const isOpen = expandedIdentity === ekey;
                             const itQty = it.qty || 1;
+                            const subItems = it.subItems || [];
+                            const subQty = getSubItemQty(it);
+                            const subDiff = itQty - subQty;
                             return (
                               <div key={it.id} style={{ marginTop:k>0?6:0,padding:"6px 8px",background:"#fff",borderRadius:6,border:"1px solid #e4e0d8" }}>
                                 <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                                   <button onClick={()=>setExpandedIdentity(isOpen?null:ekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#999",padding:"0 4px",fontFamily:"inherit" }}>{isOpen?"▾":"▸"}</button>
-                                  <span style={{ fontSize:12,fontWeight:700,color:it.name?"#2d2a26":"#bbb" }}>{it.name || "(未填姓名)"}</span>
+                                  <input value={it.name||""} onChange={e=>updateIdentity(evt.id,i,it.id,{name:e.target.value})} placeholder="代購姓名"
+                                    style={{ padding:"3px 8px",borderRadius:5,border:"1px solid #e4e0d8",fontSize:12,fontFamily:"inherit",fontWeight:700,color:"#2d2a26",background:"#fff",width:100 }}/>
                                   <div style={{ display:"flex",alignItems:"center",gap:2 }}>
                                     <button onClick={(e)=>{e.stopPropagation();if(itQty>1)updateIdentity(evt.id,i,it.id,{qty:itQty-1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>−</button>
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
-                                  {(evt.tixOnly !== false) && it.locked && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:6,background:"#fce8e8",color:"#8b3a3a",fontWeight:700 }}>🔒 帳號鎖</span>}
-                                  {(evt.tixOnly !== false) && it.tixAccount && <span style={{ fontSize:10,color:"#888" }}>· {it.tixAccount}</span>}
-                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                  {/* 上游 badge — 哪個上游供貨 (僅 4 層 mode) */}
+                                  {is4LayerMode && it.supplier && (
+                                    <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {it.supplier}</span>
+                                  )}
+                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) */}
+                                  {is4LayerMode && subItems.length > 0 && (
+                                    subDiff === 0
+                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
+                                      : subDiff > 0
+                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
+                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
+                                  )}
+                                  {is4LayerMode && (
+                                    <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
+                                  )}
+                                  <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft: is4LayerMode ? 0 : "auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
-                                {isOpen && (
+                                {isOpen && is4LayerMode && (
+                                  <>
+                                  {/* 代購本身的上游選擇(可選填) — 僅 4 層 mode */}
+                                  {(() => {
+                                    const supSet = new Set();
+                                    (evt.buyers || []).forEach(bb => {
+                                      (bb.batches || []).forEach(bt => {
+                                        const m = (bt.detail || "").match(/([^\s·]+?)供/);
+                                        if (m) supSet.add(m[1]);
+                                      });
+                                      (bb.identities || []).forEach(ii => { if (ii.supplier) supSet.add(ii.supplier); });
+                                    });
+                                    if (it.supplier) supSet.add(it.supplier);
+                                    const supOpts = Array.from(supSet).sort((a,b)=>a.localeCompare(b, "zh-TW"));
+                                    if (supOpts.length === 0 && !it.supplier) return null;
+                                    return (
+                                      <div style={{ marginTop:6,display:"flex",alignItems:"center",gap:6,fontSize:11,padding:"4px 6px",background:"#fffaeb",borderRadius:5,border:"1px solid #f0e4b8" }}>
+                                        <span style={{ color:"#7a6028",fontWeight:600 }}>📦 此代購的票來自:</span>
+                                        <select value={it.supplier||""} onChange={e=>updateIdentity(evt.id,i,it.id,{supplier:e.target.value})}
+                                          style={{ padding:"3px 7px",borderRadius:4,border:"1px solid #d4cdb8",fontSize:11,fontFamily:"inherit",background:"#fff" }}>
+                                          <option value="">(未指定)</option>
+                                          {supOpts.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                        <input value={it.supplier||""} onChange={e=>updateIdentity(evt.id,i,it.id,{supplier:e.target.value})} placeholder="或自填上游名" style={{ padding:"3px 7px",borderRadius:4,border:"1px solid #d4cdb8",fontSize:11,fontFamily:"inherit",background:"#fff",width:100 }}/>
+                                      </div>
+                                    );
+                                  })()}
+                                  {/* ─── 代購底下的實名清單(端客戶實際資料) — 僅 4 層 mode ─── */}
+                                  <div style={{ marginTop:8,padding:"8px 10px",background:"#faf9f6",borderRadius:6,border:"1px dashed #d4cdb8" }}>
+                                    <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,flexWrap:"wrap",gap:6 }}>
+                                      <div style={{ display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+                                        <span style={{ fontSize:11,fontWeight:700,color:"#7a6850" }}>📝 {it.name||"此代購"} 的實名 {subItems.length} 筆 ({subQty} / {itQty} 張)</span>
+                                        {subItems.length > 0 && (
+                                          subDiff === 0
+                                            ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#dfeadf",color:"#3a7a3a" }}>✅ 張數齊</span>
+                                            : subDiff > 0
+                                              ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#fce8e8",color:"#8b3a3a" }}>⚠ 還差 {subDiff} 筆</span>
+                                              : <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:8,background:"#f6ecd8",color:"#8b6a2d" }}>多了 {-subDiff} 張</span>
+                                        )}
+                                      </div>
+                                      <button onClick={()=>addSubItem(evt.id,i,it.id)} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 新增實名</button>
+                                    </div>
+                                    {subItems.length === 0 && (
+                                      <div style={{ fontSize:10,color:"#a09080",padding:"2px 2px" }}>還沒有實名 — {it.name||"此代購"} 預計給 {itQty} 筆,可用 🔗 連結讓 {it.name||"此代購"} 自己填</div>
+                                    )}
+                                    {subItems.map((si, sik) => {
+                                      const sekey = `${ekey}_${si.id}`;
+                                      const siOpen = expandedSubItem === sekey;
+                                      const siQty = si.qty || 1;
+                                      return (
+                                        <div key={si.id} style={{ marginTop:sik>0?5:0,padding:"5px 7px",background:"#fff",borderRadius:5,border:"1px solid #e8e3d4" }}>
+                                          <div style={{ display:"flex",alignItems:"center",gap:5,flexWrap:"wrap" }}>
+                                            <button onClick={()=>setExpandedSubItem(siOpen?null:sekey)} style={{ background:"none",border:"none",cursor:"pointer",fontSize:10,color:"#999",padding:"0 3px",fontFamily:"inherit" }}>{siOpen?"▾":"▸"}</button>
+                                            <input value={si.name||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{name:e.target.value})} placeholder="姓名"
+                                              style={{ padding:"3px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#fff",width:90 }}/>
+                                            <div style={{ display:"flex",alignItems:"center",gap:1 }}>
+                                              <button onClick={()=>{if(siQty>1)updateSubItem(evt.id,i,it.id,si.id,{qty:siQty-1});}} style={{ width:18,height:18,borderRadius:3,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:10,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>−</button>
+                                              <span style={{ fontSize:10,fontWeight:700,minWidth:30,textAlign:"center",color:"#666" }}>{siQty}張</span>
+                                              <button onClick={()=>updateSubItem(evt.id,i,it.id,si.id,{qty:siQty+1})} style={{ width:18,height:18,borderRadius:3,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:10,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
+                                            </div>
+                                            {!siOpen && si.idNumber && <span style={{ fontSize:10,color:"#888" }}>· {si.idNumber}</span>}
+                                            {!siOpen && si.phone && <span style={{ fontSize:10,color:"#888" }}>· {si.phone}</span>}
+                                            <button onClick={()=>removeSubItem(evt.id,i,it.id,si.id)} style={{ marginLeft:"auto",width:20,height:20,borderRadius:4,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:10,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
+                                          </div>
+                                          {siOpen && (
+                                            <div style={{ marginTop:5,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))",gap:5 }}>
+                                              {[
+                                                { key:"phone", label:"電話", ph:"09xx..." },
+                                                { key:"idNumber", label:"身分證", ph:"A123..." },
+                                                { key:"memberNo", label:"會員編號", ph:"" },
+                                              ].map(field => (
+                                                <label key={field.key} style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>{field.label}</span>
+                                                  <input value={si[field.key]||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{[field.key]:e.target.value})} placeholder={field.ph}
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                                </label>
+                                              ))}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>拓元帳號</span>
+                                                  <input value={si.tixAccount||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{tixAccount:e.target.value})} placeholder="帳號/Email"
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}/>
+                                                </label>
+                                              )}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:9,color:"#888" }}>
+                                                  <span style={{ fontWeight:600 }}>登入方式</span>
+                                                  <select value={si.loginVia||""} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{loginVia:e.target.value})}
+                                                    style={{ padding:"4px 6px",borderRadius:4,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"inherit",background:"#faf9f6" }}>
+                                                    <option value="">未選</option>
+                                                    <option value="facebook">Facebook</option>
+                                                    <option value="google">Google</option>
+                                                  </select>
+                                                </label>
+                                              )}
+                                              {(evt.tixOnly !== false) && (
+                                                <label style={{ display:"flex",alignItems:"center",gap:4,fontSize:10,color:"#666",cursor:"pointer",alignSelf:"end",padding:"4px 0" }}>
+                                                  <input type="checkbox" checked={!!si.locked} onChange={e=>updateSubItem(evt.id,i,it.id,si.id,{locked:e.target.checked})} style={{ cursor:"pointer",margin:0 }}/>
+                                                  <span style={{ fontWeight:600 }}>🔒 帳號鎖</span>
+                                                </label>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  </>
+                                )}
+                                {isOpen && !is4LayerMode && (
                                   <div style={{ marginTop:6,display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))",gap:6 }}>
-                                    <IdentityNameAutocomplete
-                                      identity={it}
-                                      history={identityHistory}
-                                      isTix={evt.tixOnly !== false}
-                                      onFill={updates=>updateIdentity(evt.id,i,it.id,updates)}
-                                    />
-                                    {/* 通用欄位:不分系統都需要 */}
                                     {[
                                       { key:"phone", label:"電話", ph:"09xx..." },
                                       { key:"idNumber", label:"身分證", ph:"A123..." },
@@ -3417,7 +3891,6 @@ function MainApp() {
                                           style={{ padding:"5px 7px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6" }}/>
                                       </label>
                                     ))}
-                                    {/* 拓元專屬欄位:只有 evt.tixOnly !== false 時顯示 */}
                                     {(evt.tixOnly !== false) && (
                                       <label style={{ display:"flex",flexDirection:"column",gap:2,fontSize:10,color:"#888" }}>
                                         <span style={{ fontWeight:600 }}>拓元帳號</span>
@@ -3585,17 +4058,37 @@ function MainApp() {
         {!showLog&&tab==="buyers"&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
           {(()=>{
             const s=search.toLowerCase();
-            const fb=search?buyersAggregated.filter(b=>b.name.toLowerCase().includes(s)):buyersAggregated;
+            // 搜尋:訂購人名 或 上游名(支援搜「君儀」→ 找出所有有君儀供貨的訂購人)
+            const fb=search?buyersAggregated.filter(b=>
+              b.name.toLowerCase().includes(s) ||
+              Object.keys(b.supplierTotals||{}).some(sup => sup.toLowerCase().includes(s))
+            ):buyersAggregated;
             if(fb.length===0)return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有訂購人"}</div>;
-            return fb.map(buyer=>{
+            // 跨所有訂購人的上游總計 (供搜尋過濾後的小摘要)
+            const grandSup={};
+            fb.forEach(b=>{Object.entries(b.supplierTotals||{}).forEach(([k,v])=>{grandSup[k]=(grandSup[k]||0)+v;});});
+            const grandSupEnts=Object.entries(grandSup).sort((a,b)=>b[1]-a[1]);
+            return (<>
+              {grandSupEnts.length>0&&(
+                <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"8px 14px",fontSize:12,color:"#7a6028" }}>
+                  📦 上游總計 ({fb.length} 個訂購人):{grandSupEnts.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 4px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b> 張</span>))}
+                </div>
+              )}
+              {fb.map(buyer=>{
               const isExp=expandedId===`buyer-${buyer.name}`;
               const bc=buyer.unpaidQty>0?"#c47070":buyer.refundCount>0?"#c4a040":"#8b7355";
+              const supEnts=Object.entries(buyer.supplierTotals||{}).sort((a,b)=>b[1]-a[1]);
               return (<div key={buyer.name} className="anim-in" style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${bc}` }}>
                 <div onClick={()=>setExpandedId(isExp?null:`buyer-${buyer.name}`)} style={{ padding:"14px 18px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
                   <div style={{ flex:1 }}>
                     <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                       <span style={{ fontWeight:700,fontSize:16 }}>{buyer.name}</span>
                       <span style={{ fontSize:12,fontWeight:700,padding:"2px 10px",borderRadius:12,background:"#f0ede8",color:"#8b7355" }}>{buyer.totalQty} 張 · {buyer.orders.length} 場</span>
+                      {supEnts.length>0&&(
+                        <span style={{ fontSize:11,padding:"2px 8px",borderRadius:10,background:"#fffaeb",border:"1px solid #e6d8a0",color:"#7a6028" }}>
+                          {supEnts.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>))}
+                        </span>
+                      )}
                       {buyer.unpaidQty>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#fce8e8",color:"#8b3a3a" }}>未付款 {buyer.unpaidQty}張</span>}
                       {buyer.refundCount>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#f6f0e0",color:"#8b6a2d" }}>待退費 {buyer.refundCount}筆</span>}
                       {buyer.refundedCount>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#dfeadf",color:"#4a6b4a" }}>已退款 {buyer.refundedCount}筆</span>}
@@ -3636,8 +4129,9 @@ function MainApp() {
                   </div>
                 </div>)}
               </div>);
-            });
-          })()}
+            })}
+            </>);
+            })()}
         </div>)}
 
         {/* Identity (實名簿) view */}
@@ -3710,21 +4204,47 @@ function MainApp() {
               <div style={{ fontSize:11 }}>每次新增訂購人 / 分批時,系統會記錄訂購日期到這裡</div>
             </div>
           ):(<>
-            {/* 摘要 */}
-            <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
-              📊 共 <b>{orderLogData.length}</b> 個訂購日 · 總 <b>{orderLogData.reduce((s,d)=>s+d.totalQty,0)}</b> 張 · <b>{orderLogData.reduce((s,d)=>s+d.items.length,0)}</b> 筆訂購
-            </div>
-            {orderLogData.map(group => {
+            {/* 上游切換 + 摘要 */}
+            {(() => {
+              // 收集所有有出現過的上游名稱
+              const supplierSet = new Set();
+              orderLogData.forEach(g => g.items.forEach(it => { if (it.supplier) supplierSet.add(it.supplier); }));
+              const allSuppliers = Array.from(supplierSet).sort((a, b) => a.localeCompare(b, "zh-TW"));
+              // 計算當前 filter 下的統計
+              const passesFilter = (it) => orderLogSupplierFilter === "all" || it.supplier === orderLogSupplierFilter;
+              const filteredGroups = orderLogData.map(g => {
+                const filtered = g.items.filter(passesFilter);
+                return { ...g, items: filtered, totalQty: filtered.reduce((s,x)=>s+x.qty,0), supplierQty: filtered.filter(x=>x.source==="supplier").reduce((s,x)=>s+x.qty,0), buyerQty: filtered.filter(x=>x.source==="buyer").reduce((s,x)=>s+x.qty,0) };
+              }).filter(g => g.items.length > 0);
+              const totalSup = filteredGroups.reduce((s,d)=>s+d.supplierQty,0);
+              const totalBuy = filteredGroups.reduce((s,d)=>s+d.buyerQty,0);
+              return (
+                <>
+                  {allSuppliers.length > 0 && (
+                    <div style={{ background:"#fff",borderRadius:10,padding:"10px 12px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center" }}>
+                      <span style={{ fontSize:11,color:"#888",marginRight:4 }}>上游:</span>
+                      {[{key:"all",label:"全部"}, ...allSuppliers.map(s => ({key:s, label:s}))].map(opt => (
+                        <button key={opt.key} onClick={()=>setOrderLogSupplierFilter(opt.key)} style={{ padding:"5px 12px",borderRadius:7,border:"none",fontSize:12,cursor:"pointer",fontFamily:"inherit",fontWeight:700,background:orderLogSupplierFilter===opt.key?"#b8531a":"#f7f3ec",color:orderLogSupplierFilter===opt.key?"#fff":"#666" }}>{opt.label}</button>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#7a6028" }}>
+                    📊 共 <b>{filteredGroups.length}</b> 個訂購日 · 
+                    {totalSup>0 && <> <span style={{color:"#4a7a4a"}}>📦 上游進貨 <b>{totalSup}</b> 張</span> · </>}
+                    {totalBuy>0 && <span style={{color:"#b8531a"}}>👥 買家異動 <b>{totalBuy}</b> 張</span>}
+                    {orderLogSupplierFilter !== "all" && <span style={{ marginLeft:8,fontSize:10,color:"#aa7030" }}>(只看 {orderLogSupplierFilter})</span>}
+                  </div>
+                  {filteredGroups.map(group => {
               const d = new Date(group.date + "T00:00:00");
               const weekday = ["日","一","二","三","四","五","六"][d.getDay()];
               const monthDay = `${d.getMonth()+1}/${d.getDate()}`;
               const year = d.getFullYear();
-              // 按場次再分組,同場次同日合併
               const byEvent = new Map();
               group.items.forEach(it => {
-                if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, buyers: [], qty: 0 });
+                if (!byEvent.has(it.eventName)) byEvent.set(it.eventName, { eventName: it.eventName, eventId: it.eventId, eventStatus: it.eventStatus, supplierItems: [], buyerItems: [], qty: 0 });
                 const ev = byEvent.get(it.eventName);
-                ev.buyers.push(it);
+                if (it.source === "supplier") ev.supplierItems.push(it);
+                else ev.buyerItems.push(it);
                 ev.qty += it.qty;
               });
               const eventGroups = Array.from(byEvent.values()).sort((a,b)=>b.qty-a.qty);
@@ -3735,26 +4255,48 @@ function MainApp() {
                       <span style={{ fontSize:18,fontWeight:800,color:"#2d2a26" }}>{monthDay}</span>
                       <span style={{ fontSize:11,color:"#888",marginLeft:8 }}>{year} · 週{weekday}</span>
                     </div>
-                    <div style={{ fontSize:13,color:"#b8531a",fontWeight:700 }}>{group.totalQty} 張</div>
+                    <div style={{ fontSize:12,fontWeight:700 }}>
+                      {group.supplierQty>0 && <span style={{color:"#4a7a4a",marginRight:8}}>📦 {group.supplierQty}</span>}
+                      {group.buyerQty>0 && <span style={{color:"#b8531a"}}>👥 {group.buyerQty}</span>}
+                    </div>
                   </div>
-                  <div style={{ display:"flex",flexDirection:"column",gap:6 }}>
+                  <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
                     {eventGroups.map((eg, ei) => (
-                      <div key={ei} style={{ display:"flex",alignItems:"baseline",gap:8,padding:"4px 0",fontSize:12 }}>
-                        <button onClick={()=>jumpToEvent(eg.eventId, eg.eventStatus)} style={{ padding:"2px 8px",borderRadius:5,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#5a5046",fontWeight:600,minWidth:0,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={eg.eventName}>{eg.eventName}</button>
-                        <span style={{ flex:1,color:"#666" }}>
-                          {eg.buyers.map((b, bi) => (
-                            <span key={bi} style={{ marginRight:8 }}>
-                              {b.buyerName} <b style={{color:"#b8531a"}}>{b.qty}</b>
-                              {b.st!=="normal" && <span style={{ marginLeft:3,padding:"0 4px",borderRadius:3,background:BUYER_STATUS[b.st]?.bg||"#eee",color:BUYER_STATUS[b.st]?.color||"#999",fontSize:9,fontWeight:700 }}>{BUYER_STATUS[b.st]?.icon||""}</span>}
-                            </span>
-                          ))}
-                        </span>
+                      <div key={ei} style={{ padding:"4px 0",fontSize:12 }}>
+                        <div style={{ display:"flex",alignItems:"baseline",gap:8,marginBottom:eg.supplierItems.length||eg.buyerItems.length?4:0 }}>
+                          <button onClick={()=>jumpToEvent(eg.eventId, eg.eventStatus)} style={{ padding:"2px 8px",borderRadius:5,border:"1px solid #d4d0c8",background:"#faf9f6",fontSize:11,cursor:"pointer",fontFamily:"inherit",color:"#5a5046",fontWeight:600,minWidth:0,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={eg.eventName}>{eg.eventName}</button>
+                          <span style={{ color:"#b8531a",fontWeight:700,fontSize:11 }}>{eg.qty} 張</span>
+                        </div>
+                        {eg.supplierItems.length>0 && (
+                          <div style={{ paddingLeft:10,fontSize:11,color:"#4a7a4a",marginTop:2 }}>
+                            <span style={{ fontSize:10,opacity:.7,marginRight:4 }}>📦 上游</span>
+                            {eg.supplierItems.map((b, bi) => (
+                              <span key={bi} style={{ marginRight:8 }}>
+                                {b.supplier||"上游"} <b>{b.qty}</b>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {eg.buyerItems.length>0 && (
+                          <div style={{ paddingLeft:10,fontSize:11,color:"#666",marginTop:2 }}>
+                            <span style={{ fontSize:10,opacity:.7,marginRight:4 }}>👥 買家</span>
+                            {eg.buyerItems.map((b, bi) => (
+                              <span key={bi} style={{ marginRight:8 }}>
+                                {b.buyerName} <b style={{color:"#b8531a"}}>{b.qty}</b>
+                                {b.st!=="normal" && <span style={{ marginLeft:3,padding:"0 4px",borderRadius:3,background:BUYER_STATUS[b.st]?.bg||"#eee",color:BUYER_STATUS[b.st]?.color||"#999",fontSize:9,fontWeight:700 }}>{BUYER_STATUS[b.st]?.icon||""}</span>}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
               );
             })}
+                </>
+              );
+            })()}
           </>)}
         </div>)}
 
@@ -3850,6 +4392,7 @@ function MainApp() {
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
       {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
       {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
+      {identityLinkModal&&(()=>{const e=events.find(x=>x.id===identityLinkModal.eventId);const b=e?.buyers?.[identityLinkModal.buyerIdx];const it=b?.identities?.find(x=>x.id===identityLinkModal.identityId);return e&&b&&it?<IdentityRealnameLinkModal event={e} buyer={b} identity={it} onClose={()=>setIdentityLinkModal(null)} onRegenerate={()=>regenerateIdentityRealnameLink(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)}/>:null;})()}
       {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
