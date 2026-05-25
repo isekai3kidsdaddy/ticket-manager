@@ -445,6 +445,268 @@ function DataDiffModal({ diff, onClose, onRestore }) {
   );
 }
 
+// ─── 批次匯入實名 — 解析 helpers ───
+const normalizePhoneForImport = (raw) => {
+  if (raw === undefined || raw === null) return "";
+  let p = String(raw).replace(/[\s\-+()]/g, ""); // 去掉空白/橫線/+/括號
+  if (p.startsWith("886")) p = "0" + p.slice(3);
+  if (/^9\d{8}$/.test(p)) p = "0" + p; // Google Sheet 砍 0 的補回來
+  return p;
+};
+const normalizeLoginForImport = (raw) => {
+  if (!raw) return "";
+  const v = String(raw).trim().toLowerCase();
+  if (["facebook","fb","f","臉書"].includes(v)) return "facebook";
+  if (["google","g","gmail","谷歌"].includes(v)) return "google";
+  return "";
+};
+const normalizeLockedForImport = (raw) => {
+  if (raw === undefined || raw === null) return false;
+  const v = String(raw).trim().toLowerCase();
+  return ["是","✓","✔","true","1","y","yes","lock","鎖","已鎖"].includes(v);
+};
+const normalizeQtyForImport = (raw) => {
+  const n = parseInt(String(raw||"").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+// 解析貼上的試算表內容
+const parseImportRows = (rawText) => {
+  const lines = String(rawText||"").split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
+  if (lines.length === 0) return { rows: [], hasHeader: false };
+  const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖"];
+  const firstCells = lines[0].split("\t");
+  const hasHeader = firstCells.some(c => HEADER_KEYWORDS.some(k => c.includes(k)));
+  let columnMap, dataLines;
+  if (hasHeader) {
+    columnMap = {};
+    firstCells.forEach((cell, i) => {
+      const c = cell.trim();
+      if (c.includes("訂購人")) columnMap.buyer = i;
+      else if (c.includes("姓名")) columnMap.name = i;
+      else if (c.includes("拿幾張") || c === "張數") columnMap.qty = i;
+      else if (c.includes("電話") || c.includes("手機")) columnMap.phone = i;
+      else if (c.includes("身分證") || c.includes("身份證")) columnMap.idNumber = i;
+      else if (c.includes("拓元")) columnMap.tixAccount = i;
+      else if (c.includes("登入")) columnMap.loginVia = i;
+      else if (c.includes("鎖")) columnMap.locked = i;
+    });
+    dataLines = lines.slice(1);
+  } else {
+    // 預設順序:訂購人 / 姓名 / 拿幾張 / 電話 / 身分證 / 拓元帳號 / 登入方式 / 帳號被鎖
+    columnMap = { buyer:0, name:1, qty:2, phone:3, idNumber:4, tixAccount:5, loginVia:6, locked:7 };
+    dataLines = lines;
+  }
+  const rows = dataLines.map((line, idx) => {
+    const cells = line.split("\t");
+    const get = (k) => columnMap[k] !== undefined ? (cells[columnMap[k]] || "") : "";
+    return {
+      idx,
+      raw: line,
+      buyer: get("buyer").trim(),
+      name: get("name").trim(),
+      qty: normalizeQtyForImport(get("qty")),
+      phone: normalizePhoneForImport(get("phone")),
+      idNumber: get("idNumber").trim().toUpperCase(),
+      tixAccount: get("tixAccount").trim(),
+      loginVia: normalizeLoginForImport(get("loginVia")),
+      locked: normalizeLockedForImport(get("locked")),
+    };
+  });
+  return { rows, hasHeader, columnMap };
+};
+
+// 批次匯入實名 Modal
+function BatchImportIdentityModal({ event, onClose, onConfirm }) {
+  const [rawText, setRawText] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [assignments, setAssignments] = useState({}); // rowIdx -> 指派的訂購人名(覆寫)
+  const [newBuyerNames, setNewBuyerNames] = useState({}); // rowIdx -> 新訂購人名(顯示輸入框時用)
+  const [skipped, setSkipped] = useState({}); // rowIdx -> bool
+
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const doParse = () => {
+    const result = parseImportRows(rawText);
+    setParsed(result);
+    setAssignments({});
+    setNewBuyerNames({});
+    setSkipped({});
+  };
+
+  const buyerNamesList = (event.buyers || []).map(b => b.name);
+  const matchBuyer = (name) => {
+    const target = (name || "").trim().toLowerCase();
+    if (!target) return null;
+    return (event.buyers || []).find(b => (b.name||"").trim().toLowerCase() === target);
+  };
+
+  // 預計算每列狀態
+  const processedRows = (parsed?.rows || []).map(r => {
+    // 決定 target buyer:優先用 newBuyerName(新增),其次 assignments(覆寫),最後 row.buyer
+    const newBn = newBuyerNames[r.idx];
+    const ovBn = assignments[r.idx];
+    const targetBuyerName = newBn !== undefined ? newBn : (ovBn || r.buyer);
+    const matched = newBn !== undefined ? null : matchBuyer(targetBuyerName);
+    // 如果是新訂購人模式,只要名字非空就算 ok
+    const willCreateNewBuyer = newBn !== undefined && newBn.trim();
+
+    let status = "ok";
+    let issue = "";
+    if (!r.name) { status = "error"; issue = "缺姓名"; }
+    else if (!matched && !willCreateNewBuyer) {
+      status = "needAssign";
+      issue = r.buyer ? `找不到訂購人「${r.buyer}」` : "缺訂購人";
+    }
+
+    // 重複偵測
+    let dupInfo = null;
+    if (matched) {
+      const dup = (matched.identities || []).find(it =>
+        (r.idNumber && it.idNumber && it.idNumber.toUpperCase() === r.idNumber) ||
+        (r.phone && it.phone && it.phone === r.phone) ||
+        (r.name && it.name && it.name === r.name)
+      );
+      if (dup) dupInfo = `已有相似資料:${dup.name}/${dup.phone||"-"}/${dup.idNumber||"-"}`;
+    }
+
+    return { ...r, targetBuyerName, matched, willCreateNewBuyer, status, issue, dupInfo };
+  });
+
+  const okCount = processedRows.filter(r => r.status === "ok" && !skipped[r.idx]).length;
+  const skippedCount = processedRows.filter(r => skipped[r.idx]).length;
+  const needAssignCount = processedRows.filter(r => r.status === "needAssign" && !skipped[r.idx]).length;
+  const errorCount = processedRows.filter(r => r.status === "error" && !skipped[r.idx]).length;
+
+  const doConfirm = () => {
+    const additions = {};
+    processedRows.forEach(r => {
+      if (skipped[r.idx]) return;
+      if (r.status !== "ok") return;
+      const buyerKey = r.matched ? r.matched.name : r.targetBuyerName.trim();
+      if (!buyerKey || !r.name) return;
+      if (!additions[buyerKey]) additions[buyerKey] = [];
+      additions[buyerKey].push({
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}_${r.idx}`,
+        name: r.name,
+        phone: r.phone,
+        idNumber: r.idNumber,
+        tixAccount: r.tixAccount,
+        loginVia: r.loginVia,
+        locked: r.locked,
+        memberNo: "",
+        qty: r.qty,
+      });
+    });
+    onConfirm(additions);
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:760,maxHeight:"88vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:6 }}>
+          <h3 style={{ margin:0,fontSize:17,fontWeight:700 }}>📥 批次匯入實名</h3>
+          <span style={{ fontSize:12,color:"#888" }}>{event.name}</span>
+        </div>
+        <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.5 }}>
+          必要:<b style={{color:"#666"}}>訂購人 · 姓名</b>　選填:電話 · 身分證 · 拿幾張 · 拓元帳號 · 登入方式 · 帳號被鎖<br/>
+          第一列若含「訂購人」「姓名」等表頭會自動辨識欄位順序;否則用上方順序<br/>
+          智能修補:電話被砍 0 會自動補回;登入方式 FB/Google 通通認得
+        </div>
+        <div style={{ background:"#f7f3ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,color:"#7a6850" }}>
+          此場目前訂購人 ({buyerNamesList.length}):{buyerNamesList.length>0?buyerNamesList.join(", "):"(無)"}
+        </div>
+
+        {!parsed ? (
+          <>
+            <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="從 Google Sheet 複製整批 row 貼這裡(含表頭最好)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
+            <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
+              <button onClick={onClose} style={{ padding:"8px 16px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>取消</button>
+              <button onClick={doParse} disabled={!rawText.trim()} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:rawText.trim()?"#2d2a26":"#999",color:"#faf9f6",fontSize:13,cursor:rawText.trim()?"pointer":"not-allowed",fontWeight:700,fontFamily:"inherit" }}>🔍 解析預覽</button>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* 摘要 */}
+            <div style={{ background:errorCount+needAssignCount>0?"#fff0eb":"#e8f0e8",borderRadius:8,padding:"8px 12px",fontSize:12,marginBottom:10,border:`1px solid ${errorCount+needAssignCount>0?"#e0a890":"#b8d4b8"}` }}>
+              共 {processedRows.length} 筆 · <b style={{color:"#5a7a5a"}}>{okCount} 可匯入</b>
+              {needAssignCount>0 && <> · <span style={{color:"#c47070"}}>{needAssignCount} 需指派訂購人</span></>}
+              {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
+              {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
+              {parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(已辨識表頭)</span>}
+            </div>
+            {/* row list */}
+            <div style={{ flex:1,overflowY:"auto",border:"1px solid #e4e0d8",borderRadius:8,padding:"4px 8px" }}>
+              {processedRows.map(r => {
+                const isSkipped = !!skipped[r.idx];
+                const bg = isSkipped ? "#f5f5f5" : r.status==="ok" ? "#fff" : r.status==="needAssign" ? "#fffaeb" : "#fff0eb";
+                const icon = isSkipped ? "⊝" : r.status==="ok" ? "✓" : r.status==="needAssign" ? "⚠" : "✗";
+                const iconColor = isSkipped ? "#bbb" : r.status==="ok" ? "#5a7a5a" : r.status==="needAssign" ? "#c89030" : "#c47070";
+                return (
+                  <div key={r.idx} style={{ padding:"8px 10px",borderBottom:"1px solid #f5f3ef",background:bg,opacity:isSkipped?0.5:1 }}>
+                    <div style={{ display:"flex",alignItems:"baseline",gap:8 }}>
+                      <span style={{ fontSize:14,color:iconColor,fontWeight:700,minWidth:14 }}>{icon}</span>
+                      <span style={{ fontSize:13,fontWeight:700,minWidth:80 }}>
+                        {r.matched ? r.matched.name : (r.willCreateNewBuyer ? `${r.targetBuyerName} ✨新` : (r.buyer || "(無)"))}
+                      </span>
+                      <span style={{ fontSize:12,color:"#888" }}>→</span>
+                      <span style={{ fontSize:12,color:"#444" }}>
+                        {r.name||<span style={{color:"#c47070"}}>(缺姓名)</span>}
+                        {r.qty>1 && <span style={{color:"#888"}}> ×{r.qty}</span>}
+                        {r.idNumber && <span style={{color:"#666"}}> · 🆔{r.idNumber}</span>}
+                        {r.phone && <span style={{color:"#666"}}> · 📱{r.phone}</span>}
+                        {r.tixAccount && <span style={{color:"#666"}}> · 🎫{r.tixAccount}</span>}
+                        {r.loginVia && <span style={{color:"#666"}}> · {r.loginVia==="facebook"?"FB":"G"}</span>}
+                        {r.locked && <span style={{color:"#8b3a3a"}}> · 🔒</span>}
+                      </span>
+                      <button onClick={()=>setSkipped(s=>({...s,[r.idx]:!s[r.idx]}))} style={{ marginLeft:"auto",padding:"2px 8px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",fontSize:11,cursor:"pointer",color:isSkipped?"#5a7a5a":"#888",fontFamily:"inherit" }}>{isSkipped?"恢復":"跳過"}</button>
+                    </div>
+                    {r.issue && !isSkipped && (
+                      <div style={{ marginTop:6,marginLeft:22,fontSize:11,color:"#c47070" }}>{r.issue}</div>
+                    )}
+                    {r.status==="needAssign" && !isSkipped && (
+                      <div style={{ marginTop:6,marginLeft:22,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap" }}>
+                        <span style={{ fontSize:11,color:"#888" }}>指派給:</span>
+                        <select value={assignments[r.idx]||""} onChange={e=>{setAssignments(a=>({...a,[r.idx]:e.target.value}));setNewBuyerNames(n=>{const c={...n};delete c[r.idx];return c;});}} style={{ padding:"3px 8px",borderRadius:6,border:"1px solid #c4b89a",fontSize:11,fontFamily:"inherit",background:"#fff" }}>
+                          <option value="">(請選)</option>
+                          {buyerNamesList.map(n => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                        <span style={{ fontSize:11,color:"#888" }}>或</span>
+                        {newBuyerNames[r.idx] !== undefined ? (
+                          <>
+                            <input value={newBuyerNames[r.idx]} onChange={e=>setNewBuyerNames(n=>({...n,[r.idx]:e.target.value}))} placeholder="新訂購人名" style={{ padding:"3px 8px",borderRadius:6,border:"1px solid #b8d4b8",fontSize:11,fontFamily:"inherit",background:"#f5faf5",width:120 }} autoFocus/>
+                            <button onClick={()=>setNewBuyerNames(n=>{const c={...n};delete c[r.idx];return c;})} style={{ padding:"2px 6px",borderRadius:5,border:"none",background:"transparent",cursor:"pointer",fontSize:11,color:"#888" }}>✕</button>
+                          </>
+                        ) : (
+                          <button onClick={()=>setNewBuyerNames(n=>({...n,[r.idx]:r.buyer||""}))} style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #b8d4b8",background:"#e8f0e8",fontSize:11,cursor:"pointer",fontWeight:600,color:"#4a7a4a",fontFamily:"inherit" }}>+ 新增訂購人</button>
+                        )}
+                      </div>
+                    )}
+                    {r.dupInfo && !isSkipped && r.status==="ok" && (
+                      <div style={{ marginTop:6,marginLeft:22,fontSize:11,color:"#c89030" }}>⚠ {r.dupInfo}(仍會新增為另一筆)</div>
+                    )}
+                  </div>
+                );
+              })}
+              {processedRows.length === 0 && <div style={{ padding:30,textAlign:"center",color:"#999",fontSize:13 }}>沒有解析到任何 row</div>}
+            </div>
+            <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"space-between",alignItems:"center" }}>
+              <button onClick={()=>{setParsed(null);}} style={{ padding:"8px 14px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#888",fontFamily:"inherit" }}>← 重新貼上</button>
+              <div style={{ display:"flex",gap:8 }}>
+                <button onClick={onClose} style={{ padding:"8px 16px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>取消</button>
+                <button onClick={doConfirm} disabled={okCount===0} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:okCount>0?"#2d2a26":"#999",color:"#faf9f6",fontSize:13,cursor:okCount>0?"pointer":"not-allowed",fontWeight:700,fontFamily:"inherit" }}>✓ 確認匯入 {okCount} 筆</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 訂購人輸出 Modal:把訂購人清單轉成 LINE 文字 / Excel / CSV
 function BuyerExportModal({ buyers, title, onClose }) {
   const [mode, setMode] = useState("text"); // text | sheet | csv
@@ -757,6 +1019,7 @@ export default function App() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [inputModal, setInputModal] = useState(null);
   const [identityExportModal, setIdentityExportModal] = useState(null); // { events:[evt], title }
+  const [importIdentityModal, setImportIdentityModal] = useState(null); // { eventId } 批次匯入實名
   const [buyerExportModal, setBuyerExportModal] = useState(null); // { buyers: [...], title }
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
@@ -787,9 +1050,40 @@ export default function App() {
   const restoreFromDaily = (dateKey) => {
     const ds = dailySnapshots[dateKey];
     if (!ds || !ds.payload) return;
-    addLog(`📅 從 ${dateKey} 的每日快照還原`, snap());
-    setEvents(ds.payload.events || []);
-    setBuyerNames(ds.payload.buyerNames || []);
+    // 預先算 newLogs 才能一次到位 (而不是 addLog + setEvents 分開)
+    const restoreLog = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+      time: Date.now(),
+      msg: `📅 從 ${dateKey} 的每日快照還原`,
+      snapshot: snap(),
+    };
+    const newLogs = [restoreLog, ...(logs||[])].slice(0, 500)
+      .map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
+    const targetEvents = ds.payload.events || [];
+    const targetNames = ds.payload.buyerNames || [];
+    // 標記被還原的場次都「我動過」,避免 polling 之後把它沖回去
+    targetEvents.forEach(e => recordEventAction(e.id, "touch"));
+    (events || []).forEach(e => { if (!targetEvents.find(t => t.id === e.id)) recordEventAction(e.id, "delete"); });
+    setEvents(targetEvents);
+    setBuyerNames(targetNames);
+    setLogs(newLogs);
+    // 立刻 force-push 上雲,避免被別的同步路徑沖掉
+    if (SUPABASE_READY) {
+      (async () => {
+        savingInFlightRef.current = true;
+        try {
+          setSyncStatus("saving");
+          const force = await saveToSupabase({ events: targetEvents, buyerNames: targetNames, logs: slimLogsForCloud(newLogs) }, null, { force: true });
+          if (force.ok) {
+            setSyncStatus("saved");
+            setLastSyncedAt(force.updatedAt);
+            lastSyncedAtRef.current = force.updatedAt;
+            lastSavedSignature.current = makeSignature(targetEvents, targetNames, newLogs);
+            updateBase({ events: targetEvents, buyerNames: targetNames, logs: newLogs });
+          } else { setSyncStatus("error"); }
+        } finally { savingInFlightRef.current = false; }
+      })();
+    }
   };
 
   // 同步寫 log:只在合併後 events 真的跟當下不同時才記,避免 polling 洗版
@@ -801,6 +1095,25 @@ export default function App() {
       if (before === after) return;
     } catch {}
     addLog(msg, snap());
+  };
+
+  // 同步寫 log helper:回傳「插入 sync log 後」的新 logs 陣列 (pure function)
+  // 解決 addLog + setLogs 衝突造成 log 被吃掉的 bug
+  // 用法:const newLogs = buildSyncLogs(mergedEvents, msg, mergedLogs); setLogs(newLogs);
+  const buildSyncLogs = (newEvents, msg, baseLogs) => {
+    try {
+      const before = stableStringify(events);
+      const after = stableStringify(newEvents);
+      if (before === after) return baseLogs;
+    } catch {}
+    const newLog = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+      time: Date.now(),
+      msg,
+      snapshot: snap(),
+    };
+    return [newLog, ...(baseLogs || [])].slice(0, 500)
+      .map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
   };
 
   // Sync status: 'idle' | 'loading' | 'saving' | 'saved' | 'error' | 'offline'
@@ -1105,10 +1418,10 @@ export default function App() {
               const mergeResult = mergeEvents(events, base.events||[], remoteP.events||[]);
               const mergedNames = mergeBuyerNames(buyerNames, remoteP.buyerNames||[]);
               const mergedLogs = mergeLogs(logs, remoteP.logs||[]);
-              logSyncIfChanged(mergeResult.merged, `🔄 開啟 app 時合併雲端與本地`);
+              const finalLogs = buildSyncLogs(mergeResult.merged, `🔄 開啟 app 時合併雲端與本地`, mergedLogs);
               setEvents(mergeResult.merged);
               setBuyerNames(mergedNames);
-              setLogs(mergedLogs);
+              setLogs(finalLogs);
               if (mergeResult.conflicts.length > 0) {
                 console.warn("載入時有衝突場次:", mergeResult.conflicts.map(c=>c.name));
               }
@@ -1355,19 +1668,19 @@ export default function App() {
         if (mergeResult.conflicts.length === 0) {
           // 沒有真衝突 -> 自動合併並上傳
           const mergedEvents = mergeResult.merged;
-          logSyncIfChanged(mergedEvents, `🔄 上傳時偵測到雲端更新,自動合併`);
+          const finalLogs = buildSyncLogs(mergedEvents, `🔄 上傳時偵測到雲端更新,自動合併`, mergedLogs);
           setEvents(mergedEvents);
           setBuyerNames(mergedNames);
-          setLogs(mergedLogs);
+          setLogs(finalLogs);
           setSyncStatus("saving");
           // 上傳合併後版本(用 remoteTs 當基準,確保不會再撞)
-          const force = await saveToSupabase({ events: mergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, remoteTs);
+          const force = await saveToSupabase({ events: mergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(finalLogs) }, remoteTs);
           if (force.ok) {
             setSyncStatus("saved");
             setLastSyncedAt(force.updatedAt);
             lastSyncedAtRef.current = force.updatedAt;
-            lastSavedSignature.current = makeSignature(mergedEvents, mergedNames, mergedLogs);
-            updateBase({ events: mergedEvents, buyerNames: mergedNames, logs: mergedLogs });
+            lastSavedSignature.current = makeSignature(mergedEvents, mergedNames, finalLogs);
+            updateBase({ events: mergedEvents, buyerNames: mergedNames, logs: finalLogs });
           } else {
             // 第二次又撞?稍後重試(下次資料變動時會自動再來)
             setSyncStatus("error");
@@ -1399,17 +1712,17 @@ export default function App() {
                 savingInFlightRef.current = true;
                 try {
                   setSyncStatus("saving");
-                  logSyncIfChanged(safeMergedEvents, `🛡 衝突解決:保留我的版本`);
+                  const finalLogs = buildSyncLogs(safeMergedEvents, `🛡 衝突解決:保留我的版本`, mergedLogs);
                   setEvents(safeMergedEvents);
                   setBuyerNames(mergedNames);
-                  setLogs(mergedLogs);
-                  const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, null, { force: true });
+                  setLogs(finalLogs);
+                  const force = await saveToSupabase({ events: safeMergedEvents, buyerNames: mergedNames, logs: slimLogsForCloud(finalLogs) }, null, { force: true });
                   if (force.ok) {
                     setSyncStatus("saved");
                     setLastSyncedAt(force.updatedAt);
                     lastSyncedAtRef.current = force.updatedAt;
-                    lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, mergedLogs);
-                    updateBase({ events: safeMergedEvents, buyerNames: mergedNames, logs: mergedLogs });
+                    lastSavedSignature.current = makeSignature(safeMergedEvents, mergedNames, finalLogs);
+                    updateBase({ events: safeMergedEvents, buyerNames: mergedNames, logs: finalLogs });
                   } else { setSyncStatus("error"); }
                 } finally { savingInFlightRef.current = false; }
               })();
@@ -1422,17 +1735,17 @@ export default function App() {
                 try {
                   setSyncStatus("saving");
                   // 注意:此 log 特別重要,因為「採用對方」會把本地資料替換成雲端,容易被誤點
-                  logSyncIfChanged(otherChoiceEvents, `🔄 衝突解決:採用對方版本(本地被替換)`);
+                  const finalLogs = buildSyncLogs(otherChoiceEvents, `🔄 衝突解決:採用對方版本(本地被替換)`, mergedLogs);
                   setEvents(otherChoiceEvents);
                   setBuyerNames(mergedNames);
-                  setLogs(mergedLogs);
-                  const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: slimLogsForCloud(mergedLogs) }, null, { force: true });
+                  setLogs(finalLogs);
+                  const force = await saveToSupabase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: slimLogsForCloud(finalLogs) }, null, { force: true });
                   if (force.ok) {
                     setSyncStatus("saved");
                     setLastSyncedAt(force.updatedAt);
                     lastSyncedAtRef.current = force.updatedAt;
-                    lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, mergedLogs);
-                    updateBase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: mergedLogs });
+                    lastSavedSignature.current = makeSignature(otherChoiceEvents, mergedNames, finalLogs);
+                    updateBase({ events: otherChoiceEvents, buyerNames: mergedNames, logs: finalLogs });
                   } else { setSyncStatus("error"); }
                 } finally { savingInFlightRef.current = false; }
               })();
@@ -1469,10 +1782,10 @@ export default function App() {
 
         // 如果有衝突,不要靜默覆蓋。把雲端拉下來但保留本地修改(本地優先)
         const finalEvents = mergeResult.merged;
-        logSyncIfChanged(finalEvents, `🔄 頁面回前景,合併雲端更新`);
+        const finalLogs = buildSyncLogs(finalEvents, `🔄 頁面回前景,合併雲端更新`, mergedLogs);
         setEvents(finalEvents);
         setBuyerNames(mergedNames);
-        setLogs(mergedLogs);
+        setLogs(finalLogs);
         setLastSyncedAt(res.updatedAt);
         lastSyncedAtRef.current = res.updatedAt;
         // 「上次同步的版本」記成雲端的版本(不是合併後),
@@ -1506,7 +1819,7 @@ export default function App() {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1515,7 +1828,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
 
   // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
@@ -1552,24 +1865,28 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
       try {
         const newEvents = JSON.parse(e.newValue);
-        if (Array.isArray(newEvents)) {
-          // 直接用其他分頁寫入的版本
-          logSyncIfChanged(newEvents, `🔄 從其他分頁同步`);
-          setEvents(newEvents);
-        }
+        let nextLogs = logs;
         // buyerNames / logs 也跟著拉
         const namesStr = window.localStorage.getItem("tkm-v3-names");
         if (namesStr) { try { const nn = JSON.parse(namesStr); if (Array.isArray(nn)) setBuyerNames(nn); } catch {} }
         const logsStr = window.localStorage.getItem("tkm-v3-logs");
-        if (logsStr) { try { const ll = JSON.parse(logsStr); if (Array.isArray(ll)) setLogs(ll); } catch {} }
+        if (logsStr) { try { const ll = JSON.parse(logsStr); if (Array.isArray(ll)) nextLogs = ll; } catch {} }
+        if (Array.isArray(newEvents)) {
+          // 直接用其他分頁寫入的版本,但插入一筆 sync log
+          const finalLogs = buildSyncLogs(newEvents, `🔄 從其他分頁同步`, nextLogs);
+          setEvents(newEvents);
+          setLogs(finalLogs);
+        } else {
+          setLogs(nextLogs);
+        }
       } catch {}
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1588,7 +1905,7 @@ export default function App() {
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -1606,13 +1923,13 @@ export default function App() {
 
         if (mergeResult.conflicts.length === 0) {
           // 無衝突:靜默合併 (但會在時間軸留下紀錄,方便排查資料變動來源)
-          logSyncIfChanged(mergeResult.merged, `🔄 自動同步:雲端有新版本已合併`);
+          const finalLogs = buildSyncLogs(mergeResult.merged, `🔄 自動同步:雲端有新版本已合併`, mergedLogs);
           setEvents(mergeResult.merged);
           setBuyerNames(mergedNames);
-          setLogs(mergedLogs);
+          setLogs(finalLogs);
           setLastSyncedAt(res.updatedAt);
           lastSyncedAtRef.current = res.updatedAt;
-          // sig 記成雲端版本(不是合併後),這樣本地修改會被視為「未上傳」自動觸發 save
+          // sig 記成雲端版本(不是合併後),這樣本地修改 + sync log 會被視為「未上傳」自動觸發 save
           lastSavedSignature.current = makeSignature(remoteP.events||[], remoteP.buyerNames||[], remoteP.logs||[]);
           updateBase({ events: remoteP.events||[], buyerNames: remoteP.buyerNames||[], logs: remoteP.logs||[] });
         }
@@ -1620,7 +1937,7 @@ export default function App() {
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -1961,6 +2278,41 @@ export default function App() {
       return e;
     });
   };
+  // 批次匯入實名:additionsByBuyer = { 訂購人名: [identity, ...] }
+  // 找不到的訂購人會自動新增,找到的會把實名 append 到該 buyer 的 identities
+  const bulkImportIdentities = (eventId, additionsByBuyer) => {
+    const evt = events.find(e => e.id === eventId);
+    if (!evt) return { created: 0, addedTo: 0, identities: 0 };
+    const totalIdentities = Object.values(additionsByBuyer).reduce((s, arr) => s + arr.length, 0);
+    const buyerNamesCount = Object.keys(additionsByBuyer).length;
+    addLog(`📥 批次匯入 ${totalIdentities} 筆實名到【${evt.name}】(${buyerNamesCount} 個訂購人)`, snap());
+    updateEvent(eventId, e => {
+      Object.entries(additionsByBuyer).forEach(([buyerName, newIds]) => {
+        if (!newIds || newIds.length === 0) return;
+        let bIdx = e.buyers.findIndex(b => (b.name||"").trim().toLowerCase() === buyerName.trim().toLowerCase());
+        if (bIdx < 0) {
+          // 新增訂購人,張數預設等於這次匯入的實名總張數
+          const totalQ = newIds.reduce((s, n) => s + (n.qty||1), 0);
+          e.buyers.push({
+            name: buyerName,
+            qty: totalQ,
+            batches: [{ qty: totalQ, st: "normal", detail: "" }],
+            identities: [],
+            addedAt: Date.now(),
+          });
+          bIdx = e.buyers.length - 1;
+        }
+        const existing = e.buyers[bIdx].identities || [];
+        e.buyers[bIdx] = {
+          ...e.buyers[bIdx],
+          identities: [...existing, ...newIds],
+          needRealName: true,
+        };
+      });
+      return e;
+    });
+  };
+
   const updateIdentity = (eventId, idx, identityId, updates) => {
     updateEvent(eventId, e => {
       const list = (e.buyers[idx].identities || []).map(it => it.id === identityId ? { ...it, ...updates } : it);
@@ -2060,8 +2412,20 @@ export default function App() {
     setConfirmModal({
       msg: `即將還原到 ${ts}「${log.msg}」之前的版本。\n\n⚠ 之後的 ${newerCount} 筆異動會消失!\n\n👉 強烈建議先點「💾 匯出備份」存一份再還原,以防萬一。\n\n要繼續嗎?`,
       onYes: () => {
-        addLog(`⟲ 還原到 ${ts}`, snap());
+        // 預先算 newLogs 才能一次到位 (避免 addLog/setLogs 跟下面 save 不同步)
+        const restoreLog = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          time: Date.now(),
+          msg: `⟲ 還原到 ${ts}`,
+          snapshot: snap(),
+        };
+        const newLogs = [restoreLog, ...(logs||[])].slice(0, 500)
+          .map((l, idx) => idx < SNAPSHOT_KEEP ? l : { ...l, snapshot: null });
+        // 標記被還原的場次都「我動過」,避免 polling 之後把它沖回去
+        (log.snapshot || []).forEach(e => recordEventAction(e.id, "touch"));
+        (events || []).forEach(e => { if (!(log.snapshot||[]).find(s => s.id === e.id)) recordEventAction(e.id, "delete"); });
         setEvents(log.snapshot);
+        setLogs(newLogs);
         setConfirmModal(null);
         // 還原後立刻強制上傳,避免被 polling 覆蓋
         if (SUPABASE_READY) {
@@ -2069,13 +2433,13 @@ export default function App() {
             savingInFlightRef.current = true;
             try {
               setSyncStatus("saving");
-              const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs: slimLogsForCloud(logs) }, null, { force: true });
+              const force = await saveToSupabase({ events: log.snapshot, buyerNames, logs: slimLogsForCloud(newLogs) }, null, { force: true });
               if (force.ok) {
                 setSyncStatus("saved");
                 setLastSyncedAt(force.updatedAt);
                 lastSyncedAtRef.current = force.updatedAt;
-                lastSavedSignature.current = makeSignature(log.snapshot, buyerNames, logs);
-                updateBase({ events: log.snapshot, buyerNames, logs });
+                lastSavedSignature.current = makeSignature(log.snapshot, buyerNames, newLogs);
+                updateBase({ events: log.snapshot, buyerNames, logs: newLogs });
               } else { setSyncStatus("error"); }
             } finally { savingInFlightRef.current = false; }
           })();
@@ -2898,6 +3262,7 @@ export default function App() {
                   </button>
                   {evt.status==="active"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 全部已取票</button>}
                   {(evt.buyers||[]).some(b=>(b.identities||[]).length>0)&&<button onClick={()=>setIdentityExportModal({events:[evt],title:evt.name})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出本場實名</button>}
+                  <button onClick={()=>setImportIdentityModal({eventId:evt.id})} title="從試算表批次貼上,自動填入訂購人的實名資料" style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4b8",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#4a7a4a",fontFamily:"inherit" }}>📥 批次匯入實名</button>
                   {(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"))&&<button onClick={()=>{
                     addLog(`【${evt.name}】全部待退費標記為已退款`,snap());
                     updateEvent(evt.id,e=>{
@@ -3189,6 +3554,7 @@ export default function App() {
       {inputModal&&<InputModal title={inputModal.title} label={inputModal.label} defaultValue={inputModal.defaultValue} placeholder={inputModal.placeholder} onSave={inputModal.onSave} onCancel={()=>setInputModal(null)}/>}
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
+      {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
       {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
