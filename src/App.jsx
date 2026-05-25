@@ -694,7 +694,8 @@ const LINE_FIELD_MAP = {
 //     姓名:X / 拿 N 張 / 電話:X / 身分證:X / 拓元:X / 登入:X / 會員#:X / 🔒帳號鎖
 //     ...
 // 每行一個人,欄位用 " / " 分隔,【】裡的名字當訂購人(buyer);可重複貼到不同 app 用 ✓
-const parseSlashLineFormat = (rawText) => {
+const parseSlashLineFormat = (rawText, opts = {}) => {
+  const ignoreSections = !!opts.ignoreSections;
   const rows = [];
   let currentSection = ''; // 【】 內的訂購人名
   const lines = String(rawText || "").split(/\r?\n/);
@@ -702,9 +703,12 @@ const parseSlashLineFormat = (rawText) => {
     line = line.trim();
     if (!line) continue;
     if (line.startsWith('📌')) continue; // 略過場次標題
-    // 【區段名】 視為訂購人
+    // 【區段名】 視為訂購人 — 若 ignoreSections 為 true 則忽略不記
     const sec = line.match(/^[【\[]\s*(.+?)\s*[】\]]\s*$/);
-    if (sec) { currentSection = sec[1].trim(); continue; }
+    if (sec) {
+      if (!ignoreSections) currentSection = sec[1].trim();
+      continue;
+    }
     // 用 " / " 切割欄位
     const parts = line.split(/\s*\/\s*/).filter(p => p.trim());
     if (parts.length === 0) continue;
@@ -780,12 +784,13 @@ const parseLineBlocks = (rawText) => {
   return rows;
 };
 // 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」還是「斜線一行式」
-const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
+// opts.ignoreSections: 斜線一行式裡的【區段】是否要當訂購人名?(預設 false → 用區段;true → 忽略,改用 defaultBuyer)
+const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "", opts = {}) => {
   if (!rawText || !rawText.trim()) return { rows: [], hasHeader: false, format: "tsv" };
   // 偵測「斜線一行式」: 同行有 "姓名:" + " / " 分隔 (app 本身輸出的 LINE 文字格式)
   const isSlashLine = /姓名\s*[:：][^\n/]*\s\/\s/.test(rawText);
   if (isSlashLine) {
-    const rows = parseSlashLineFormat(rawText);
+    const rows = parseSlashLineFormat(rawText, { ignoreSections: !!opts.ignoreSections });
     const applied = rows.map(r => ({ ...r, buyer: r.buyer || defaultBuyer.trim(), agent: r.agent || defaultAgent.trim() }));
     return { rows: applied, hasHeader: false, format: "slashline" };
   }
@@ -857,6 +862,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const [skipped, setSkipped] = useState({}); // rowIdx -> bool
   const [defaultBuyer, setDefaultBuyer] = useState(""); // 預設訂購人(LINE 原文無訂購人欄時必填)
   const [defaultAgent, setDefaultAgent] = useState(""); // 預設代購(識別人層) — 若填,匯入時整批變成這個代購底下的「細項實名」
+  const [ignoreSections, setIgnoreSections] = useState(false); // 斜線一行式裡的【區段】是否要當訂購人名?關掉 → 全部用預設訂購人
 
   useEffect(() => {
     const h = (e) => { if (e.key === "Escape") onClose(); };
@@ -876,7 +882,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const modalMaxHeight = `${Math.floor(88 / zoomFactor)}vh`;
 
   const doParse = () => {
-    const result = parseImportRows(rawText, defaultBuyer, defaultAgent);
+    const result = parseImportRows(rawText, defaultBuyer, defaultAgent, { ignoreSections });
     setParsed(result);
     setAssignments({});
     setNewBuyerNames({});
@@ -990,6 +996,10 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
               <input value={defaultAgent} onChange={e=>setDefaultAgent(e.target.value)} placeholder="(選填)整批變成 XX 識別人底下的細項實名(如「萬陽」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }}/>
               <span style={{ fontSize:10,color:"#aaa" }} title="不填 = 每筆變成識別人;填了 = 每筆變成這個識別人底下的細項實名">ⓘ</span>
             </div>
+            <label style={{ display:"flex",alignItems:"center",gap:6,marginBottom:8,padding:"6px 10px",background:"#fff9ec",borderRadius:6,border:"1px solid #e4d4a0",cursor:"pointer",fontSize:11,color:"#7a6028" }}>
+              <input type="checkbox" checked={ignoreSections} onChange={e=>setIgnoreSections(e.target.checked)} style={{ cursor:"pointer",margin:0 }}/>
+              <span><b>忽略【區段】訂購人</b> — 斜線一行式裡的【151】【萬姊】這種區段都忽略,整批改用「預設訂購人」</span>
+            </label>
             <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="貼 Google Sheet 整批 row,或直接貼 LINE 訊息 (姓名: / 電話: / 身分證:... 多人用空行分隔)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
             <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
               <button onClick={onClose} style={{ padding:"8px 16px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>取消</button>
@@ -1015,6 +1025,23 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                 <button onClick={skipAllDups} title="把所有偵測到重複的列一鍵標為跳過" style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #c89030",background:"#fffaeb",fontSize:11,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>⊝ 跳過全部重複 ({dupCount})</button>
               )}
             </div>
+            {/* 全部指派 — 一鍵把所有「找不到訂購人」的列指派給選好的訂購人 */}
+            {needAssignCount > 0 && buyerNamesList.length > 0 && (
+              <div style={{ background:"#fff9ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,border:"1px solid #e4d4a0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap" }}>
+                <span style={{ color:"#7a6028",fontWeight:600 }}>⚡ 全部 {needAssignCount} 筆「找不到」一鍵指派給:</span>
+                <select onChange={e => {
+                  const v = e.target.value;
+                  if (!v) return;
+                  const next = { ...assignments };
+                  processedRows.forEach(r => { if (r.status === "needAssign" && !skipped[r.idx]) next[r.idx] = v; });
+                  setAssignments(next);
+                  e.target.value = "";
+                }} style={{ padding:"4px 10px",borderRadius:5,border:"1px solid #c4b89a",fontSize:11,fontFamily:"inherit",background:"#fff",cursor:"pointer" }}>
+                  <option value="">選訂購人...</option>
+                  {buyerNamesList.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+            )}
             {/* row list */}
             <div style={{ flex:1,minHeight:0,overflowY:"auto",border:"1px solid #e4e0d8",borderRadius:8,padding:"4px 8px" }}>
               {processedRows.map(r => {
