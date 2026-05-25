@@ -2805,7 +2805,8 @@ function MainApp() {
     if (b) {
       const parts = [];
       if (updates.note !== undefined && updates.note !== b.note) parts.push("備註更新");
-      if (parts.length > 0) addLog(`【${evt.name}】${b.name}：${parts.join("、")}`, snap());
+      if (updates.name !== undefined && updates.name !== b.name) parts.push(`名字改為「${updates.name}」`);
+      if (parts.length > 0) addLog(`【${evt.name}】${b.name}:${parts.join("、")}`, snap());
     }
     updateEvent(eventId, e => { e.buyers[idx] = { ...e.buyers[idx], ...updates }; return e; });
   };
@@ -3726,7 +3727,15 @@ function MainApp() {
                     const isAddingBatch = addingBatch && addingBatch.eventId===evt.id && addingBatch.idx===i;
                     return (<div key={i} style={{ padding:"10px 12px",borderRadius:10,background:scMain.bg,border:`1px solid ${scMain.color}22` }}>
                       <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
-                        <span style={{ fontWeight:700,fontSize:14,minWidth:70,color:scMain.color }}>{b.name}</span>
+                        <input
+                          value={b.name||""}
+                          onChange={e=>updateBuyer(evt.id,i,{name:e.target.value})}
+                          placeholder="訂購人名"
+                          title="點此編輯訂購人名字"
+                          style={{ fontWeight:700,fontSize:14,minWidth:70,maxWidth:140,color:scMain.color,padding:"3px 8px",borderRadius:5,border:"1px solid transparent",background:"transparent",fontFamily:"inherit",cursor:"text",transition:"background .15s" }}
+                          onFocus={e=>{e.target.style.background="#fff";e.target.style.border="1px solid #d4d0c8";}}
+                          onBlur={e=>{e.target.style.background="transparent";e.target.style.border="1px solid transparent";}}
+                        />
                         <span style={{ fontSize:13,fontWeight:700,color:"#555" }}>共 {totalQ} 張</span>
                         {(() => {
                           // 上游分流:依 batch.detail 抓「X供」分組
