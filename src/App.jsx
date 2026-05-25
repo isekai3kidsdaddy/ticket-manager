@@ -580,6 +580,13 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const skippedCount = processedRows.filter(r => skipped[r.idx]).length;
   const needAssignCount = processedRows.filter(r => r.status === "needAssign" && !skipped[r.idx]).length;
   const errorCount = processedRows.filter(r => r.status === "error" && !skipped[r.idx]).length;
+  // 重複偵測:有 dupInfo 且還沒被跳過的列數 (可以一鍵跳過)
+  const dupCount = processedRows.filter(r => r.dupInfo && !skipped[r.idx]).length;
+  const skipAllDups = () => {
+    const next = { ...skipped };
+    processedRows.forEach(r => { if (r.dupInfo) next[r.idx] = true; });
+    setSkipped(next);
+  };
 
   const doConfirm = () => {
     const additions = {};
@@ -631,12 +638,18 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
         ) : (
           <>
             {/* 摘要 */}
-            <div style={{ background:errorCount+needAssignCount>0?"#fff0eb":"#e8f0e8",borderRadius:8,padding:"8px 12px",fontSize:12,marginBottom:10,border:`1px solid ${errorCount+needAssignCount>0?"#e0a890":"#b8d4b8"}` }}>
-              共 {processedRows.length} 筆 · <b style={{color:"#5a7a5a"}}>{okCount} 可匯入</b>
-              {needAssignCount>0 && <> · <span style={{color:"#c47070"}}>{needAssignCount} 需指派訂購人</span></>}
-              {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
-              {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
-              {parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(已辨識表頭)</span>}
+            <div style={{ background:errorCount+needAssignCount>0?"#fff0eb":"#e8f0e8",borderRadius:8,padding:"8px 12px",fontSize:12,marginBottom:10,border:`1px solid ${errorCount+needAssignCount>0?"#e0a890":"#b8d4b8"}`,display:"flex",alignItems:"center",flexWrap:"wrap",gap:4 }}>
+              <span>
+                共 {processedRows.length} 筆 · <b style={{color:"#5a7a5a"}}>{okCount} 可匯入</b>
+                {needAssignCount>0 && <> · <span style={{color:"#c47070"}}>{needAssignCount} 需指派訂購人</span></>}
+                {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
+                {dupCount>0 && <> · <span style={{color:"#c89030"}}>{dupCount} 重複</span></>}
+                {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
+                {parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(已辨識表頭)</span>}
+              </span>
+              {dupCount>0 && (
+                <button onClick={skipAllDups} title="把所有偵測到重複的列一鍵標為跳過" style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #c89030",background:"#fffaeb",fontSize:11,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>⊝ 跳過全部重複 ({dupCount})</button>
+              )}
             </div>
             {/* row list */}
             <div style={{ flex:1,overflowY:"auto",border:"1px solid #e4e0d8",borderRadius:8,padding:"4px 8px" }}>
