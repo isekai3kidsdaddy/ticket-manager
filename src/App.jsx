@@ -686,7 +686,65 @@ const LINE_FIELD_MAP = {
   "拿幾張": "qty", "幾張": "qty", "張數": "qty", "數量": "qty", "票數": "qty",
   "代購": "agent", "識別人": "agent", "上層": "agent", "上層代購": "agent", "屬於": "agent",
   "來自": "agentSupplier", "來源": "agentSupplier", "上游": "agentSupplier", "由誰提供": "agentSupplier",
+  "會員編號": "memberNo", "會員號": "memberNo", "會員#": "memberNo", "會員": "memberNo",
 };
+// 「斜線一行式」格式 — 從本 app 的「📋 輸出本場實名」LINE 模式匯出的內容,長這樣:
+//   📌 場次名 (X 筆)            ← 場次標頭(可選,會略過)
+//   【區段名】                    ← 訂購人 group(可選,連續區段下同一 buyer)
+//     姓名:X / 拿 N 張 / 電話:X / 身分證:X / 拓元:X / 登入:X / 會員#:X / 🔒帳號鎖
+//     ...
+// 每行一個人,欄位用 " / " 分隔,【】裡的名字當訂購人(buyer);可重複貼到不同 app 用 ✓
+const parseSlashLineFormat = (rawText) => {
+  const rows = [];
+  let currentSection = ''; // 【】 內的訂購人名
+  const lines = String(rawText || "").split(/\r?\n/);
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+    if (line.startsWith('📌')) continue; // 略過場次標題
+    // 【區段名】 視為訂購人
+    const sec = line.match(/^[【\[]\s*(.+?)\s*[】\]]\s*$/);
+    if (sec) { currentSection = sec[1].trim(); continue; }
+    // 用 " / " 切割欄位
+    const parts = line.split(/\s*\/\s*/).filter(p => p.trim());
+    if (parts.length === 0) continue;
+    const person = {};
+    let locked = false;
+    for (const part of parts) {
+      // 「拿 N 張」(無冒號的特殊張數寫法)
+      const qm = part.match(/^拿\s*(\d+)\s*張$/);
+      if (qm) { person.qty = qm[1]; continue; }
+      // 🔒 / 帳號鎖 emoji / 文字
+      if (/🔒|帳號鎖|帳號被鎖/.test(part)) { locked = true; continue; }
+      // 標準 key:value
+      const m = part.match(/^\s*([^:：]+?)\s*[:：]\s*(.*)$/);
+      if (!m) continue;
+      const key = m[1].trim();
+      const val = m[2].trim();
+      const mapped = LINE_FIELD_MAP[key];
+      if (mapped && !person[mapped]) person[mapped] = val;
+    }
+    if (person.name) {
+      rows.push({
+        idx: rows.length,
+        raw: line,
+        buyer: currentSection,
+        agent: '',
+        agentSupplier: '',
+        name: person.name,
+        qty: normalizeQtyForImport(person.qty),
+        phone: normalizePhoneForImport(person.phone || ''),
+        idNumber: (person.idNumber || '').trim().toUpperCase(),
+        tixAccount: (person.tixAccount || '').trim(),
+        loginVia: normalizeLoginForImport(person.loginVia || ''),
+        memberNo: (person.memberNo || '').trim(),
+        locked,
+      });
+    }
+  }
+  return rows;
+};
+
 const parseLineBlocks = (rawText) => {
   // 用空行分割多個人,每個 block 內依 「key: value」或「key:value」抓取
   const blocks = String(rawText||"").split(/\r?\n\s*\r?\n+/);
@@ -721,10 +779,17 @@ const parseLineBlocks = (rawText) => {
   });
   return rows;
 };
-// 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」
+// 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」還是「斜線一行式」
 const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "") => {
   if (!rawText || !rawText.trim()) return { rows: [], hasHeader: false, format: "tsv" };
-  // 偵測 LINE 格式:文字裡含「姓名:」或「姓名:」就當 LINE 原文解析
+  // 偵測「斜線一行式」: 同行有 "姓名:" + " / " 分隔 (app 本身輸出的 LINE 文字格式)
+  const isSlashLine = /姓名\s*[:：][^\n/]*\s\/\s/.test(rawText);
+  if (isSlashLine) {
+    const rows = parseSlashLineFormat(rawText);
+    const applied = rows.map(r => ({ ...r, buyer: r.buyer || defaultBuyer.trim(), agent: r.agent || defaultAgent.trim() }));
+    return { rows: applied, hasHeader: false, format: "slashline" };
+  }
+  // 偵測 LINE 區塊格式:文字裡含「姓名:」或「姓名:」且多人用空行分隔
   const isLineFormat = /(^|\n)\s*姓名\s*[:：]/.test(rawText);
   if (isLineFormat) {
     const rows = parseLineBlocks(rawText);
@@ -887,7 +952,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
         tixAccount: r.tixAccount,
         loginVia: r.loginVia,
         locked: r.locked,
-        memberNo: "",
+        memberNo: r.memberNo || "",
         qty: r.qty,
       });
     });
@@ -941,6 +1006,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                 {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
                 {dupCount>0 && <> · <span style={{color:"#c89030"}}>{dupCount} 重複</span></>}
                 {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
+                {parsed.format === "slashline" && <span style={{color:"#5a7a5a",marginLeft:6}}>(斜線一行式 — 含【區段】訂購人)</span>}
                 {parsed.format === "line" && <span style={{color:"#5a7a5a",marginLeft:6}}>(LINE 原文)</span>}
                 {parsed.format === "tsv" && parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(TSV 已辨識表頭)</span>}
                 {parsed.format === "tsv" && !parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(TSV 預設順序)</span>}
