@@ -469,10 +469,61 @@ const normalizeQtyForImport = (raw) => {
   const n = parseInt(String(raw||"").trim(), 10);
   return Number.isFinite(n) && n > 0 ? n : 1;
 };
-// 解析貼上的試算表內容
-const parseImportRows = (rawText) => {
-  const lines = String(rawText||"").split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
-  if (lines.length === 0) return { rows: [], hasHeader: false };
+// 「label:value」格式(從 LINE 貼來的客人原始訊息) → 行物件
+const LINE_FIELD_MAP = {
+  "姓名": "name",
+  "身分證字號": "idNumber", "身份證字號": "idNumber", "身份證": "idNumber", "身分證": "idNumber", "ID": "idNumber", "id": "idNumber",
+  "電話": "phone", "手機": "phone", "手機號碼": "phone", "聯絡電話": "phone",
+  "拓元帳號": "tixAccount", "拓元": "tixAccount", "帳號": "tixAccount", "Email": "tixAccount", "email": "tixAccount",
+  "登入方式": "loginVia", "登入": "loginVia",
+  "拿幾張": "qty", "幾張": "qty", "張數": "qty", "數量": "qty", "票數": "qty",
+};
+const parseLineBlocks = (rawText) => {
+  // 用空行分割多個人,每個 block 內依 「key: value」或「key:value」抓取
+  const blocks = String(rawText||"").split(/\r?\n\s*\r?\n+/);
+  const rows = [];
+  blocks.forEach((block, idx) => {
+    const person = {};
+    block.split(/\r?\n/).forEach(line => {
+      // 支援全形冒號(:) + 半形冒號(:)
+      const m = line.match(/^\s*([^:：]+?)\s*[:：]\s*(.*)$/);
+      if (!m) return;
+      const key = m[1].trim();
+      const val = m[2].trim();
+      const mapped = LINE_FIELD_MAP[key];
+      if (mapped && !person[mapped]) person[mapped] = val;
+    });
+    if (person.name) {
+      rows.push({
+        idx: rows.length,
+        raw: block.trim(),
+        buyer: "", // 訂購人在 LINE 訊息裡通常沒有,由「預設訂購人」補
+        name: person.name,
+        qty: normalizeQtyForImport(person.qty),
+        phone: normalizePhoneForImport(person.phone || ""),
+        idNumber: (person.idNumber || "").trim().toUpperCase(),
+        tixAccount: (person.tixAccount || "").trim(),
+        loginVia: normalizeLoginForImport(person.loginVia || ""),
+        locked: false,
+      });
+    }
+  });
+  return rows;
+};
+// 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」
+const parseImportRows = (rawText, defaultBuyer = "") => {
+  if (!rawText || !rawText.trim()) return { rows: [], hasHeader: false, format: "tsv" };
+  // 偵測 LINE 格式:文字裡含「姓名:」或「姓名:」就當 LINE 原文解析
+  const isLineFormat = /(^|\n)\s*姓名\s*[:：]/.test(rawText);
+  if (isLineFormat) {
+    const rows = parseLineBlocks(rawText);
+    // 預設訂購人套用到每一列
+    const applied = rows.map(r => ({ ...r, buyer: defaultBuyer.trim() || r.buyer }));
+    return { rows: applied, hasHeader: false, format: "line" };
+  }
+  // 否則走原本 TSV 解析
+  const lines = String(rawText).split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
+  if (lines.length === 0) return { rows: [], hasHeader: false, format: "tsv" };
   const HEADER_KEYWORDS = ["訂購人","姓名","電話","手機","身分證","身份證","拿幾張","張數","拓元","登入","鎖"];
   const firstCells = lines[0].split("\t");
   const hasHeader = firstCells.some(c => HEADER_KEYWORDS.some(k => c.includes(k)));
@@ -492,17 +543,17 @@ const parseImportRows = (rawText) => {
     });
     dataLines = lines.slice(1);
   } else {
-    // 預設順序:訂購人 / 姓名 / 拿幾張 / 電話 / 身分證 / 拓元帳號 / 登入方式 / 帳號被鎖
     columnMap = { buyer:0, name:1, qty:2, phone:3, idNumber:4, tixAccount:5, loginVia:6, locked:7 };
     dataLines = lines;
   }
   const rows = dataLines.map((line, idx) => {
     const cells = line.split("\t");
     const get = (k) => columnMap[k] !== undefined ? (cells[columnMap[k]] || "") : "";
+    const rawBuyer = get("buyer").trim();
     return {
       idx,
       raw: line,
-      buyer: get("buyer").trim(),
+      buyer: rawBuyer || defaultBuyer.trim(), // 沒填的話用預設
       name: get("name").trim(),
       qty: normalizeQtyForImport(get("qty")),
       phone: normalizePhoneForImport(get("phone")),
@@ -512,7 +563,7 @@ const parseImportRows = (rawText) => {
       locked: normalizeLockedForImport(get("locked")),
     };
   });
-  return { rows, hasHeader, columnMap };
+  return { rows, hasHeader, columnMap, format: "tsv" };
 };
 
 // 批次匯入實名 Modal
@@ -522,6 +573,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const [assignments, setAssignments] = useState({}); // rowIdx -> 指派的訂購人名(覆寫)
   const [newBuyerNames, setNewBuyerNames] = useState({}); // rowIdx -> 新訂購人名(顯示輸入框時用)
   const [skipped, setSkipped] = useState({}); // rowIdx -> bool
+  const [defaultBuyer, setDefaultBuyer] = useState(""); // 預設訂購人(LINE 原文無訂購人欄時必填)
 
   useEffect(() => {
     const h = (e) => { if (e.key === "Escape") onClose(); };
@@ -541,7 +593,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
   const modalMaxHeight = `${Math.floor(88 / zoomFactor)}vh`;
 
   const doParse = () => {
-    const result = parseImportRows(rawText);
+    const result = parseImportRows(rawText, defaultBuyer);
     setParsed(result);
     setAssignments({});
     setNewBuyerNames({});
@@ -629,10 +681,11 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
           <h3 style={{ margin:0,fontSize:17,fontWeight:700 }}>📥 批次匯入實名</h3>
           <span style={{ fontSize:12,color:"#888" }}>{event.name}</span>
         </div>
-        <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.5 }}>
-          必要:<b style={{color:"#666"}}>訂購人 · 姓名</b>　選填:電話 · 身分證 · 拿幾張 · 拓元帳號 · 登入方式 · 帳號被鎖<br/>
-          第一列若含「訂購人」「姓名」等表頭會自動辨識欄位順序;否則用上方順序<br/>
-          智能修補:電話被砍 0 會自動補回;登入方式 FB/Google 通通認得
+        <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.6 }}>
+          支援兩種格式 — 自動偵測:<br/>
+          <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位順序「訂購人/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
+          <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / 身分證:...」格式,多人用空行分隔<br/>
+          智能修補:電話砍 0、登入方式 FB/Google/臉書/谷歌都認得
         </div>
         <div style={{ background:"#f7f3ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,color:"#7a6850" }}>
           此場目前訂購人 ({buyerNamesList.length}):{buyerNamesList.length>0?buyerNamesList.join(", "):"(無)"}
@@ -640,7 +693,14 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
 
         {!parsed ? (
           <>
-            <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="從 Google Sheet 複製整批 row 貼這裡(含表頭最好)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
+            <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8 }}>
+              <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設訂購人:</span>
+              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="LINE 原文沒帶訂購人 → 整批套用這個名字(如「阿文」)" style={{ flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
+              <datalist id="batch-import-buyer-list">
+                {buyerNamesList.map(n => <option key={n} value={n}/>)}
+              </datalist>
+            </div>
+            <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="貼 Google Sheet 整批 row,或直接貼 LINE 訊息 (姓名: / 電話: / 身分證:... 多人用空行分隔)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
             <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
               <button onClick={onClose} style={{ padding:"8px 16px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:13,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>取消</button>
               <button onClick={doParse} disabled={!rawText.trim()} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:rawText.trim()?"#2d2a26":"#999",color:"#faf9f6",fontSize:13,cursor:rawText.trim()?"pointer":"not-allowed",fontWeight:700,fontFamily:"inherit" }}>🔍 解析預覽</button>
@@ -656,7 +716,9 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                 {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
                 {dupCount>0 && <> · <span style={{color:"#c89030"}}>{dupCount} 重複</span></>}
                 {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
-                {parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(已辨識表頭)</span>}
+                {parsed.format === "line" && <span style={{color:"#5a7a5a",marginLeft:6}}>(LINE 原文)</span>}
+                {parsed.format === "tsv" && parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(TSV 已辨識表頭)</span>}
+                {parsed.format === "tsv" && !parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(TSV 預設順序)</span>}
               </span>
               {dupCount>0 && (
                 <button onClick={skipAllDups} title="把所有偵測到重複的列一鍵標為跳過" style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #c89030",background:"#fffaeb",fontSize:11,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>⊝ 跳過全部重複 ({dupCount})</button>
