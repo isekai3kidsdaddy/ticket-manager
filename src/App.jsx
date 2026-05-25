@@ -986,19 +986,19 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
           <>
             <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap" }}>
               <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設訂購人:</span>
-              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="整批套用這個訂購人(如「妙」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
+              <input value={defaultBuyer} onChange={e=>setDefaultBuyer(e.target.value)} placeholder="整批套用這個訂購人(如「窗口」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }} list="batch-import-buyer-list"/>
               <datalist id="batch-import-buyer-list">
                 {buyerNamesList.map(n => <option key={n} value={n}/>)}
               </datalist>
             </div>
             <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap" }}>
               <span style={{ fontSize:11,color:"#888",whiteSpace:"nowrap" }}>預設代購:</span>
-              <input value={defaultAgent} onChange={e=>setDefaultAgent(e.target.value)} placeholder="(選填)整批變成 XX 識別人底下的細項實名(如「萬陽」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }}/>
+              <input value={defaultAgent} onChange={e=>setDefaultAgent(e.target.value)} placeholder="(選填)整批變成 XX 識別人底下的細項實名(如「訂購人」)" style={{ flex:1,minWidth:140,padding:"6px 10px",borderRadius:6,border:"1px solid #c4b89a",background:"#fffdf5",fontSize:12,fontFamily:"inherit",color:"#5a4a2a" }}/>
               <span style={{ fontSize:10,color:"#aaa" }} title="不填 = 每筆變成識別人;填了 = 每筆變成這個識別人底下的細項實名">ⓘ</span>
             </div>
             <label style={{ display:"flex",alignItems:"center",gap:6,marginBottom:8,padding:"6px 10px",background:"#fff9ec",borderRadius:6,border:"1px solid #e4d4a0",cursor:"pointer",fontSize:11,color:"#7a6028" }}>
               <input type="checkbox" checked={ignoreSections} onChange={e=>setIgnoreSections(e.target.checked)} style={{ cursor:"pointer",margin:0 }}/>
-              <span><b>忽略【區段】訂購人</b> — 斜線一行式裡的【151】【萬姊】這種區段都忽略,整批改用「預設訂購人」</span>
+              <span><b>忽略【區段】訂購人</b> — 斜線一行式裡的【A君】【B君】這種區段都忽略,整批改用「預設訂購人」</span>
             </label>
             <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder="貼 Google Sheet 整批 row,或直接貼 LINE 訊息 (姓名: / 電話: / 身分證:... 多人用空行分隔)" style={{ flex:1,minHeight:220,padding:"10px 12px",borderRadius:8,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"ui-monospace, monospace",background:"#faf9f6",resize:"vertical",lineHeight:1.5 }}/>
             <div style={{ display:"flex",gap:8,marginTop:12,justifyContent:"flex-end" }}>
