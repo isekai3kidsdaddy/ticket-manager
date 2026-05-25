@@ -529,6 +529,17 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
+  // 偵測桌面版的 CSS zoom (1.3),調整 maxHeight 避免上下被切
+  const zoomFactor = useMemo(() => {
+    if (typeof window === "undefined") return 1;
+    try {
+      const bodyZoom = parseFloat(window.getComputedStyle(document.body).zoom) || 1;
+      const htmlZoom = parseFloat(window.getComputedStyle(document.documentElement).zoom) || 1;
+      return bodyZoom * htmlZoom;
+    } catch { return 1; }
+  }, []);
+  const modalMaxHeight = `${Math.floor(88 / zoomFactor)}vh`;
+
   const doParse = () => {
     const result = parseImportRows(rawText);
     setParsed(result);
@@ -613,7 +624,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
 
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:760,maxHeight:"88vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:16,padding:"20px 22px",width:"100%",maxWidth:760,maxHeight:modalMaxHeight,display:"flex",flexDirection:"column",boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
         <div style={{ display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:6 }}>
           <h3 style={{ margin:0,fontSize:17,fontWeight:700 }}>📥 批次匯入實名</h3>
           <span style={{ fontSize:12,color:"#888" }}>{event.name}</span>
@@ -652,7 +663,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
               )}
             </div>
             {/* row list */}
-            <div style={{ flex:1,overflowY:"auto",border:"1px solid #e4e0d8",borderRadius:8,padding:"4px 8px" }}>
+            <div style={{ flex:1,minHeight:0,overflowY:"auto",border:"1px solid #e4e0d8",borderRadius:8,padding:"4px 8px" }}>
               {processedRows.map(r => {
                 const isSkipped = !!skipped[r.idx];
                 const bg = isSkipped ? "#f5f5f5" : r.status==="ok" ? "#fff" : r.status==="needAssign" ? "#fffaeb" : "#fff0eb";
