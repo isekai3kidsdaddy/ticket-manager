@@ -445,6 +445,284 @@ function DataDiffModal({ diff, onClose, onRestore }) {
   );
 }
 
+// ─── 實名連結:產生 32 字元 URL-safe token ───
+function generateRealnameToken() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let r = "";
+  for (let i = 0; i < 32; i++) r += chars[Math.floor(Math.random() * chars.length)];
+  return r;
+}
+
+// ─── 訂購人實名填寫頁 (供有 token 連結的訂購人填寫,完全獨立於主 app) ───
+function RealnameFormPage({ token }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [eventInfo, setEventInfo] = useState(null);
+  const [identities, setIdentities] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  useEffect(() => { loadByToken(); /* eslint-disable-next-line */ }, [token]);
+
+  async function loadByToken() {
+    setLoading(true);
+    setError(null);
+    try {
+      if (!SUPABASE_READY) throw new Error("系統未配置雲端資料庫");
+      const res = await loadFromSupabase();
+      if (!res || !res.payload) throw new Error("無法載入資料");
+      const events = res.payload.events || [];
+      let foundEvent = null, foundBuyer = null;
+      for (const evt of events) {
+        for (const b of (evt.buyers || [])) {
+          if (b.realnameToken === token) { foundEvent = evt; foundBuyer = b; break; }
+        }
+        if (foundBuyer) break;
+      }
+      if (!foundBuyer) { setError("連結無效或已被刪除"); setLoading(false); return; }
+      // 計算 buyer 總張數
+      const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
+      setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly: foundEvent.tixOnly !== false });
+      // 預填現有 identities,沒有的話建 N 個空白
+      const existing = foundBuyer.identities || [];
+      if (existing.length > 0) {
+        setIdentities(existing.map(it => ({ ...it })));
+      } else {
+        const blanks = [];
+        for (let i = 0; i < totalQty; i++) {
+          blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+        }
+        setIdentities(blanks);
+      }
+    } catch (e) {
+      setError("載入失敗: " + (e.message || "未知錯誤"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const updateField = (idx, field, value) => {
+    setIdentities(prev => prev.map((it, i) => i === idx ? { ...it, [field]: value } : it));
+  };
+  const addBlock = () => {
+    setIdentities(prev => [...prev, { id: `tmp_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 }]);
+  };
+  const removeBlock = (idx) => {
+    setIdentities(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev);
+  };
+
+  // 計算總張數 (識別跟 buyer 訂購的不符會警告)
+  const totalQtySum = identities.reduce((s, it) => s + (parseInt(it.qty)||1), 0);
+  const expectedQty = eventInfo?.totalQty || 0;
+
+  async function handleSubmit(retry = 0) {
+    setSaving(true);
+    setError(null);
+    try {
+      const fresh = await loadFromSupabase();
+      if (!fresh || !fresh.payload) throw new Error("無法載入");
+      const freshEvents = fresh.payload.events || [];
+      let eIdx = -1, bIdx = -1;
+      for (let i = 0; i < freshEvents.length; i++) {
+        const j = (freshEvents[i].buyers || []).findIndex(b => b.realnameToken === token);
+        if (j >= 0) { eIdx = i; bIdx = j; break; }
+      }
+      if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
+      const submittedIdentities = identities.map(it => ({
+        ...it,
+        name: (it.name||"").trim(),
+        idNumber: (it.idNumber||"").trim().toUpperCase(),
+        phone: (it.phone||"").trim(),
+        tixAccount: (it.tixAccount||"").trim(),
+        memberNo: (it.memberNo||"").trim(),
+        qty: parseInt(it.qty)||1,
+      }));
+      const newEvents = freshEvents.map((evt, i) => {
+        if (i !== eIdx) return evt;
+        return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submittedIdentities, needRealName: true }) };
+      });
+      const submitLog = {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+        time: Date.now(),
+        msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submittedIdentities.length} 筆`,
+        snapshot: null,
+      };
+      const newLogs = [submitLog, ...(fresh.payload.logs || [])].slice(0, 500);
+      const newPayload = { ...fresh.payload, events: newEvents, buyerNames: fresh.payload.buyerNames || [], logs: newLogs };
+      const result = await saveToSupabase(newPayload, fresh.updatedAt);
+      if (result.ok) {
+        setSavedAt(new Date());
+        setSaving(false);
+      } else if (result.reason === "stale" && retry < 3) {
+        // 雲端有人改了,重試
+        return handleSubmit(retry + 1);
+      } else {
+        setError("儲存失敗,請稍後再試");
+        setSaving(false);
+      }
+    } catch (e) {
+      setError("儲存失敗: " + (e.message || "未知錯誤"));
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div style={{ minHeight:"100vh",background:"#faf7f0",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
+        <div style={{ textAlign:"center",color:"#999",fontSize:14 }}>載入中…</div>
+      </div>
+    );
+  }
+  if (error && !eventInfo) {
+    return (
+      <div style={{ minHeight:"100vh",background:"#faf7f0",display:"flex",alignItems:"center",justifyContent:"center",padding:20,fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
+        <div style={{ background:"#fff",padding:"30px 24px",borderRadius:12,maxWidth:380,width:"100%",textAlign:"center",boxShadow:"0 4px 20px rgba(0,0,0,.06)" }}>
+          <div style={{ fontSize:36,marginBottom:8 }}>🔒</div>
+          <h2 style={{ margin:"0 0 8px",fontSize:18,color:"#8b3a3a" }}>連結無法使用</h2>
+          <p style={{ color:"#666",fontSize:13,margin:0 }}>{error}</p>
+          <p style={{ color:"#999",fontSize:11,margin:"16px 0 0" }}>請聯絡賣家確認</p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ minHeight:"100vh",background:"#faf7f0",padding:"20px 14px 60px",fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
+      <div style={{ maxWidth:480,margin:"0 auto" }}>
+        <div style={{ background:"#fff",padding:"18px 18px 14px",borderRadius:12,marginBottom:14,boxShadow:"0 2px 10px rgba(0,0,0,.04)" }}>
+          <div style={{ fontSize:11,color:"#888",letterSpacing:1,marginBottom:4 }}>票券實名制資料填寫</div>
+          <h1 style={{ margin:"0 0 10px",fontSize:18,fontWeight:700,color:"#2d2a26",lineHeight:1.3 }}>{eventInfo.eventName}</h1>
+          <div style={{ fontSize:13,color:"#666" }}>您好 <b style={{color:"#2d2a26"}}>{eventInfo.buyerName}</b>,共 <b style={{color:"#b8531a"}}>{eventInfo.totalQty}</b> 張票</div>
+          <div style={{ fontSize:11,color:"#888",marginTop:6,lineHeight:1.5 }}>請依下方欄位填寫實名資料,送出後會自動儲存。本連結可重複進入修改。</div>
+        </div>
+
+        {identities.map((it, idx) => (
+          <div key={it.id || idx} style={{ background:"#fff",padding:"14px 16px",borderRadius:10,marginBottom:10,boxShadow:"0 1px 6px rgba(0,0,0,.04)" }}>
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:"1px solid #f0ece2" }}>
+              <span style={{ fontSize:13,fontWeight:700,color:"#b8531a" }}>第 {idx+1} 份實名</span>
+              <div style={{ display:"flex",gap:6,alignItems:"center" }}>
+                <span style={{ fontSize:11,color:"#888" }}>張數</span>
+                <input type="number" min="1" value={it.qty} onChange={e=>updateField(idx, "qty", parseInt(e.target.value)||1)} style={{ width:50,padding:"4px 6px",borderRadius:5,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",textAlign:"center" }}/>
+                {identities.length > 1 && <button onClick={()=>removeBlock(idx)} style={{ marginLeft:4,width:24,height:24,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:12,color:"#c47070",fontFamily:"inherit" }} title="刪除這份">×</button>}
+              </div>
+            </div>
+            <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+              <FormField label="真實姓名 *" value={it.name} onChange={v=>updateField(idx,"name",v)} placeholder="與身分證一致"/>
+              <FormField label="身分證字號 *" value={it.idNumber} onChange={v=>updateField(idx,"idNumber",v.toUpperCase())} placeholder="A123456789" mono/>
+              <FormField label="手機號碼 *" value={it.phone} onChange={v=>updateField(idx,"phone",v)} placeholder="0912345678" mono type="tel"/>
+              {eventInfo.tixOnly && <>
+                <FormField label="拓元帳號" value={it.tixAccount} onChange={v=>updateField(idx,"tixAccount",v)} placeholder="email 或帳號" mono/>
+                <div>
+                  <label style={{ fontSize:11,color:"#888",display:"block",marginBottom:3 }}>登入方式</label>
+                  <select value={it.loginVia||""} onChange={e=>updateField(idx,"loginVia",e.target.value)} style={{ width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d4d0c8",fontSize:13,fontFamily:"inherit",background:"#fff" }}>
+                    <option value="">— 請選 —</option>
+                    <option value="facebook">Facebook</option>
+                    <option value="google">Google</option>
+                  </select>
+                </div>
+                <FormField label="會員編號" value={it.memberNo} onChange={v=>updateField(idx,"memberNo",v)} placeholder="如有請填,沒有可空" mono/>
+                <label style={{ display:"flex",alignItems:"center",gap:8,fontSize:12,color:"#666",cursor:"pointer",paddingTop:2 }}>
+                  <input type="checkbox" checked={!!it.locked} onChange={e=>updateField(idx,"locked",e.target.checked)} style={{ width:16,height:16,cursor:"pointer" }}/>
+                  此拓元帳號目前被鎖定 🔒
+                </label>
+              </>}
+            </div>
+          </div>
+        ))}
+
+        <button onClick={addBlock} style={{ width:"100%",padding:"10px",borderRadius:8,border:"1px dashed #c4b89a",background:"#fff9ec",fontSize:13,cursor:"pointer",color:"#8b6a2d",fontWeight:600,fontFamily:"inherit",marginBottom:14 }}>+ 新增一份實名</button>
+
+        {totalQtySum !== expectedQty && (
+          <div style={{ background:"#fff0eb",border:"1px solid #e0a890",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#8b3a3a",marginBottom:12 }}>
+            ⚠ 目前總張數 {totalQtySum} 張,跟訂購的 {expectedQty} 張不符。送出前請確認張數。
+          </div>
+        )}
+
+        {error && <div style={{ background:"#fff0eb",border:"1px solid #e0a890",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#8b3a3a",marginBottom:12 }}>{error}</div>}
+
+        <button onClick={()=>handleSubmit(0)} disabled={saving} style={{ width:"100%",padding:"14px",borderRadius:10,border:"none",background:saving?"#999":"#b8531a",color:"#fff",fontSize:15,cursor:saving?"wait":"pointer",fontWeight:700,fontFamily:"inherit",boxShadow:"0 4px 12px rgba(184,83,26,.25)" }}>
+          {saving?"儲存中…":(savedAt?"✓ 已儲存 · 點此再次更新":"💾 送出 / 更新資料")}
+        </button>
+
+        {savedAt && (
+          <div style={{ marginTop:10,padding:"10px 14px",background:"#e8f0e8",border:"1px solid #b8d4b8",borderRadius:8,fontSize:12,color:"#4a7a4a",textAlign:"center" }}>
+            ✓ 已成功儲存 ({savedAt.toLocaleTimeString("zh-TW",{hour12:false})})
+          </div>
+        )}
+
+        <div style={{ marginTop:30,textAlign:"center",fontSize:10,color:"#bbb",letterSpacing:1 }}>實名資料僅供票券登記用</div>
+      </div>
+    </div>
+  );
+}
+
+// 小元件:單一欄位
+function FormField({ label, value, onChange, placeholder, mono = false, type = "text" }) {
+  return (
+    <div>
+      <label style={{ fontSize:11,color:"#888",display:"block",marginBottom:3 }}>{label}</label>
+      <input type={type} value={value||""} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{ width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d4d0c8",fontSize:13,fontFamily:mono?"ui-monospace, monospace":"inherit",background:"#fff",boxSizing:"border-box" }}/>
+    </div>
+  );
+}
+
+// ─── 主 app 內顯示「實名連結」的 modal ───
+function RealnameLinkModal({ event, buyer, onClose, onRegenerate }) {
+  const [copied, setCopied] = useState(null);
+  const url = typeof window !== "undefined"
+    ? `${window.location.origin}${window.location.pathname}?fill=${buyer.realnameToken}`
+    : `?fill=${buyer.realnameToken}`;
+  const totalQty = (buyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || buyer.qty || 1;
+  const lineMsg = `Hi ${buyer.name},您訂的「${event.name}」共 ${totalQty} 張票,請點下方連結填寫實名資料:
+${url}
+
+填寫完即可關閉,資料會自動同步。`;
+
+  const copyText = async (text, key) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(()=>setCopied(null), 2000);
+    } catch {
+      // fallback
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); setCopied(key); setTimeout(()=>setCopied(null), 2000); } catch {}
+      document.body.removeChild(ta);
+    }
+  };
+
+  return (
+    <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:14,padding:"20px 22px",width:"100%",maxWidth:520,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
+        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>🔗 實名連結 — {buyer.name}</h3>
+        <div style={{ fontSize:12,color:"#888",marginBottom:14 }}>{event.name} · 共 {totalQty} 張</div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>專屬連結（請只傳給此訂購人）</div>
+        <div style={{ display:"flex",gap:6,marginBottom:12 }}>
+          <input readOnly value={url} onFocus={e=>e.target.select()} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:11,fontFamily:"ui-monospace, monospace",background:"#faf9f6",color:"#555" }}/>
+          <button onClick={()=>copyText(url, "url")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="url"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap" }}>{copied==="url"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>建議 LINE 訊息（含連結）</div>
+        <div style={{ display:"flex",gap:6,marginBottom:14 }}>
+          <textarea readOnly value={lineMsg} onFocus={e=>e.target.select()} rows={4} style={{ flex:1,padding:"8px 10px",borderRadius:7,border:"1px solid #d4d0c8",fontSize:12,fontFamily:"inherit",background:"#faf9f6",color:"#555",resize:"vertical" }}/>
+          <button onClick={()=>copyText(lineMsg, "msg")} style={{ padding:"8px 14px",borderRadius:7,border:"none",background:copied==="msg"?"#5a7a5a":"#2d2a26",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start" }}>{copied==="msg"?"✓ 已複製":"📋 複製"}</button>
+        </div>
+
+        <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:7,padding:"8px 12px",fontSize:11,color:"#7a6028",marginBottom:14,lineHeight:1.6 }}>
+          ⚠ 此連結是 <b>{buyer.name}</b> 專屬,請勿傳給其他人<br/>
+          ✓ 連結可重複進入修改,訂購人填完資料會自動同步到 app
+        </div>
+
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
+          <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+          <button onClick={onClose} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>完成</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 批次匯入實名 — 解析 helpers ───
 const normalizePhoneForImport = (raw) => {
   if (raw === undefined || raw === null) return "";
@@ -1085,7 +1363,7 @@ function IdentityExportModal({ events, title, onClose }) {
   );
 }
 
-export default function App() {
+function MainApp() {
   const [events, setEvents] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3"); if (s) return JSON.parse(s); } catch {} return INITIAL_EVENTS; });
   const [buyerNames, setBuyerNames] = useState(() => { try { const s = window.localStorage?.getItem?.("tkm-v3-names"); if (s) return JSON.parse(s); } catch {} return KNOWN_BUYERS; });
   const [tab, setTab] = useState("active");
@@ -1106,6 +1384,41 @@ export default function App() {
   const [inputModal, setInputModal] = useState(null);
   const [identityExportModal, setIdentityExportModal] = useState(null); // { events:[evt], title }
   const [importIdentityModal, setImportIdentityModal] = useState(null); // { eventId } 批次匯入實名
+  const [realnameLinkModal, setRealnameLinkModal] = useState(null); // { eventId, buyerIdx } 訂購人實名連結
+
+  const openRealnameLink = (eventId, buyerIdx) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    if (!evt || !b) return;
+    if (!b.realnameToken) {
+      // 第一次開:產生 token
+      const token = generateRealnameToken();
+      updateEvent(eventId, e => {
+        e.buyers[buyerIdx] = { ...e.buyers[buyerIdx], realnameToken: token };
+        return e;
+      });
+      addLog(`【${evt.name}】產生「${b.name}」的實名連結`, snap());
+    }
+    setRealnameLinkModal({ eventId, buyerIdx });
+  };
+
+  const regenerateRealnameLink = (eventId, buyerIdx) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    if (!evt || !b) return;
+    setConfirmModal({
+      msg: `確定要重新產生「${b.name}」的實名連結嗎?\n\n舊連結會立刻失效,訂購人需要重新拿新連結才能進入。`,
+      onYes: () => {
+        const newToken = generateRealnameToken();
+        updateEvent(eventId, e => {
+          e.buyers[buyerIdx] = { ...e.buyers[buyerIdx], realnameToken: newToken };
+          return e;
+        });
+        addLog(`【${evt.name}】重新產生「${b.name}」的實名連結(舊連結作廢)`, snap());
+        setConfirmModal(null);
+      }
+    });
+  };
   const [buyerExportModal, setBuyerExportModal] = useState(null); // { buyers: [...], title }
   const [editingPrice, setEditingPrice] = useState(null);
   const [priceVal, setPriceVal] = useState("");
@@ -1905,7 +2218,7 @@ export default function App() {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
       // 編輯 state 開著(就算 input 沒 focus)→ 不打斷
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal || realnameLinkModal) return;
       refetchFromCloud();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1914,7 +2227,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal, realnameLinkModal]);
 
   // 6) 失敗自動重試:syncStatus 變 error 後 30 秒重試,若仍失敗持續每 30 秒重試
   useEffect(() => {
@@ -1951,7 +2264,7 @@ export default function App() {
       if (Date.now() - lastInteractionRef.current < STICKY_WINDOW_MS) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal || realnameLinkModal) return;
       try {
         const newEvents = JSON.parse(e.newValue);
         let nextLogs = logs;
@@ -1972,7 +2285,7 @@ export default function App() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
+  }, [confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal, realnameLinkModal]);
 
   // 5) 定期 polling:每 30 秒自動拉一次雲端,讓多人協作能準即時看到對方修改。
   // 注意:這裡使用 mergeEvents 自動合併,避免覆蓋本地未上傳的修改。
@@ -1991,7 +2304,7 @@ export default function App() {
       // 編輯中(input/textarea focus 或 editing state) → 不打斷
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
-      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal) return;
+      if (editingPrice || editingName || editingDetail || addingBatch || editingBatch || inputModal || identityExportModal || editingCatalogKey || buyerExportModal || dataDiffModal || importIdentityModal || realnameLinkModal) return;
 
       try {
         const res = await loadFromSupabase();
@@ -2023,7 +2336,7 @@ export default function App() {
       } catch (e) { /* silent */ }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal]);
+  }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal, realnameLinkModal]);
 
   const activeEvents = events.filter(e => e.status === "active");
   const pickedEvents = events.filter(e => e.status === "picked");
@@ -3151,6 +3464,7 @@ export default function App() {
                         {b.note&&<span style={{ fontSize:11,color:"#999",marginLeft:4 }}>({b.note})</span>}
                         <div style={{ marginLeft:"auto",display:"flex",gap:4 }}>
                           <button onClick={()=>{setAddingBatch({eventId:evt.id,idx:i});setEditingBatch(null);}} title="新增分批（例如一部分已取票、一部分待退費）" style={{ padding:"3px 10px",borderRadius:7,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 分批</button>
+                          <button onClick={()=>openRealnameLink(evt.id,i)} title="產生這位訂購人的實名填寫連結(LINE 傳給他/她)" style={{ width:26,height:26,borderRadius:6,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",color:"#4a7a4a" }}>🔗</button>
                           <button onClick={()=>setInputModal({title:`編輯備註 — ${b.name}`,label:"備註",defaultValue:b.note||"",placeholder:"例：2人全勤",onSave:v=>{updateBuyer(evt.id,i,{note:v||undefined});setInputModal(null);}})}
                             style={{ width:26,height:26,borderRadius:6,border:"1px solid #e4e0d8",background:"#fff",cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",color:"#999" }} title="編輯備註">✎</button>
                           <button onClick={()=>removeBuyer(evt.id,i)} style={{ width:26,height:26,borderRadius:6,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",color:"#c47070" }} title="移除">×</button>
@@ -3641,6 +3955,7 @@ export default function App() {
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
       {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
+      {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
       {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
@@ -3961,4 +4276,14 @@ function AddEventForm({ onAdd }) {
       <button onClick={()=>{if(name.trim())onAdd(name.trim(),price.trim());}} style={{ width:"100%",padding:"12px 20px",borderRadius:12,background:"#2d2a26",color:"#faf9f6",border:"none",fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:"inherit" }}>新增</button>
     </div>
   );
+}
+
+// ─── 入口 wrapper:有 ?fill=TOKEN 就走實名填寫頁,否則走主 app ───
+export default function App() {
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location.search);
+    const fillToken = params.get("fill");
+    if (fillToken) return <RealnameFormPage token={fillToken} />;
+  }
+  return <MainApp />;
 }
