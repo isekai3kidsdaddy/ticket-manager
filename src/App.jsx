@@ -4412,18 +4412,51 @@ function MainApp() {
                           </div>
                           {isExp2 && (
                             <div style={{ padding:"0 14px 12px",borderTop:"1px solid #f0ede8" }}>
-                              <div style={{ fontSize:11,color:"#888",margin:"8px 0 6px" }}>📅 各場次明細:</div>
-                              <div style={{ display:"flex",flexDirection:"column",gap:5 }}>
-                                {idn.orders.map((o,j) => (
-                                  <div key={j} style={{ display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"#faf9f6",borderRadius:6,fontSize:12 }}>
-                                    <span style={{ fontWeight:700,color:"#5a4a2a",flex:1 }}>{o.eventName}</span>
-                                    <span style={{ color:"#666" }}>訂購人:<b style={{color:"#7a6850"}}>{o.buyerName}</b></span>
-                                    <span style={{ color:"#888" }}>·</span>
-                                    {o.supplier && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:4,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {o.supplier}</span>}
-                                    <span style={{ fontWeight:700,color:"#b8531a",minWidth:50,textAlign:"right" }}>{o.qty} 張</span>
-                                    <button onClick={()=>{setTab("active");setSearch("");setTimeout(()=>setExpandedId(o.eventId),50);}} style={{ fontSize:10,padding:"3px 8px",borderRadius:5,border:"1px solid #c4d0b0",background:"#e8f0e0",cursor:"pointer",color:"#5a7a3a",fontFamily:"inherit",fontWeight:600 }}>前往 →</button>
-                                  </div>
-                                ))}
+                              <div style={{ fontSize:11,color:"#888",margin:"8px 0 6px" }}>📅 各場次明細(按總張數排序):</div>
+                              <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                                {(() => {
+                                  // 依場次彙整(同場次可能有多筆同代購但不同上游)
+                                  const groups = new Map();
+                                  idn.orders.forEach(o => {
+                                    const key = o.eventId;
+                                    if (!groups.has(key)) groups.set(key, { eventId:o.eventId, eventName:o.eventName, eventStatus:o.eventStatus, totalQty:0, rows:[] });
+                                    const g = groups.get(key);
+                                    g.totalQty += (o.qty || 0);
+                                    g.rows.push(o);
+                                  });
+                                  const sorted = Array.from(groups.values()).sort((a,b)=>b.totalQty - a.totalQty);
+                                  return sorted.map(g => (
+                                    <div key={g.eventId} style={{ background:"#faf9f6",borderRadius:6,border:"1px solid #ece6d8",overflow:"hidden" }}>
+                                      <div style={{ display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"#f0ede0",borderBottom: g.rows.length>1?"1px solid #ece6d8":"none" }}>
+                                        <span style={{ fontWeight:700,fontSize:12,color:"#5a4a2a",flex:1 }}>{g.eventName}</span>
+                                        {g.eventStatus && g.eventStatus !== "active" && (
+                                          <span style={{ fontSize:10,padding:"1px 6px",borderRadius:4,background:g.eventStatus==="picked"?"#e0eef6":"#dfeadf",color:g.eventStatus==="picked"?"#2d6a8b":"#4a6b4a" }}>{g.eventStatus==="picked"?"已取票":"已完成"}</span>
+                                        )}
+                                        <span style={{ fontSize:13,fontWeight:700,color:"#b8531a" }}>共 {g.totalQty} 張</span>
+                                        <button onClick={()=>{setTab("active");setSearch("");setTimeout(()=>setExpandedId(g.eventId),50);}} style={{ fontSize:10,padding:"3px 8px",borderRadius:5,border:"1px solid #c4d0b0",background:"#e8f0e0",cursor:"pointer",color:"#5a7a3a",fontFamily:"inherit",fontWeight:600 }}>前往 →</button>
+                                      </div>
+                                      {g.rows.length > 1 && (
+                                        <div style={{ display:"flex",flexDirection:"column" }}>
+                                          {g.rows.map((o,k) => (
+                                            <div key={k} style={{ display:"flex",alignItems:"center",gap:8,padding:"5px 10px 5px 18px",fontSize:11,borderTop: k>0?"1px dashed #ece6d8":"none" }}>
+                                              <span style={{ color:"#999" }}>↳</span>
+                                              <span style={{ color:"#666" }}>訂購人:<b style={{color:"#7a6850"}}>{o.buyerName}</b></span>
+                                              {o.supplier && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:4,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {o.supplier}</span>}
+                                              <span style={{ marginLeft:"auto",fontWeight:700,color:"#8b6a2d" }}>{o.qty} 張</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {g.rows.length === 1 && (
+                                        <div style={{ display:"flex",alignItems:"center",gap:8,padding:"4px 10px 6px 18px",fontSize:11 }}>
+                                          <span style={{ color:"#999" }}>↳</span>
+                                          <span style={{ color:"#666" }}>訂購人:<b style={{color:"#7a6850"}}>{g.rows[0].buyerName}</b></span>
+                                          {g.rows[0].supplier && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:4,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {g.rows[0].supplier}</span>}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ));
+                                })()}
                               </div>
                             </div>
                           )}
