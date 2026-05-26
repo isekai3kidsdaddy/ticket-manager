@@ -2707,6 +2707,31 @@ function MainApp() {
     return Array.from(map.values()).sort((a, b) => b.totalQty - a.totalQty);
   }, [events]);
 
+  // 代購(識別人) 跨場次匯總:給訂購人分頁搜尋使用。
+  // 結構: { name, totalQty, orders[{eventId, eventName, eventStatus, buyerName, qty, supplier}],
+  //         supplierTotals, buyerNames(Set), buyerTotals }
+  // 例:萬陽 在「Big bang 台北」妙底下 15 張(君儀)、48 張(佩盈) → totalQty +63
+  const identitiesAggregated = useMemo(() => {
+    const map = new Map();
+    events.forEach(evt => {
+      (evt.buyers || []).forEach(b => {
+        (b.identities || []).forEach(it => {
+          const nm = (it.name || "").trim();
+          if (!nm) return;
+          if (!map.has(nm)) map.set(nm, { name: nm, totalQty: 0, orders: [], supplierTotals: {}, buyerNames: new Set(), buyerTotals: {} });
+          const e = map.get(nm);
+          const q = Math.max(0, it.qty || 0);
+          e.totalQty += q;
+          e.orders.push({ eventId: evt.id, eventName: evt.name, eventStatus: evt.status, buyerName: b.name, qty: q, supplier: it.supplier || "" });
+          e.buyerNames.add(b.name);
+          e.buyerTotals[b.name] = (e.buyerTotals[b.name] || 0) + q;
+          if (it.supplier) e.supplierTotals[it.supplier] = (e.supplierTotals[it.supplier] || 0) + q;
+        });
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => b.totalQty - a.totalQty);
+  }, [events]);
+
   // 實名資料記憶:依姓名收集歷史紀錄,給 autocomplete 用
   // 結構: Map<name, Array<{phone, idNumber, tixAccount, loginVia, locked}>>
   // 同名但身分證/電話/拓元帳號完全不同 → 視為不同人,各收一筆
@@ -4354,12 +4379,60 @@ function MainApp() {
               Object.keys(b.supplierTotals||{}).some(sup => sup.toLowerCase().includes(s)) ||
               Array.from(b.identityNames||[]).some(nm => nm.toLowerCase().includes(s))
             ):buyersAggregated;
-            if(fb.length===0)return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有訂購人"}</div>;
+            if(fb.length===0 && (!search||identitiesAggregated.filter(idn=>idn.name.toLowerCase().includes(s)).length===0))return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有訂購人"}</div>;
             // 跨所有訂購人的上游總計 (供搜尋過濾後的小摘要)
             const grandSup={};
             fb.forEach(b=>{Object.entries(b.supplierTotals||{}).forEach(([k,v])=>{grandSup[k]=(grandSup[k]||0)+v;});});
             const grandSupEnts=Object.entries(grandSup).sort((a,b)=>b[1]-a[1]);
+            // 搜尋時:若 search term 命中代購名 → 把代購匯總卡片列在最上面
+            const matchedIdents = search ? identitiesAggregated.filter(idn => idn.name.toLowerCase().includes(s)) : [];
             return (<>
+              {matchedIdents.length > 0 && (
+                <div style={{ background:"#fffbf0",border:"1px solid #e4d4a0",borderRadius:10,padding:"10px 14px" }}>
+                  <div style={{ fontSize:12,fontWeight:700,color:"#7a6028",marginBottom:8 }}>👥 代購匹配 ({matchedIdents.length}):這個名字以「代購層」存在於以下訂購人底下</div>
+                  <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+                    {matchedIdents.map(idn => {
+                      const supEnts2 = Object.entries(idn.supplierTotals||{}).sort((a,b)=>b[1]-a[1]);
+                      const buyerEnts = Object.entries(idn.buyerTotals||{}).sort((a,b)=>b[1]-a[1]);
+                      const isExp2 = expandedId === `idn-${idn.name}`;
+                      return (
+                        <div key={idn.name} style={{ background:"#fff",borderRadius:8,border:"1px solid #e6d8a0",overflow:"hidden",borderLeft:"4px solid #c89030" }}>
+                          <div onClick={()=>setExpandedId(isExp2?null:`idn-${idn.name}`)} style={{ padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between" }}>
+                            <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
+                              <span style={{ fontWeight:700,fontSize:14,color:"#7a6028" }}>👥 {idn.name}</span>
+                              <span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,background:"#f0ede8",color:"#8b7355" }}>{idn.totalQty} 張 · {idn.orders.length} 場</span>
+                              {supEnts2.length > 0 && (
+                                <span style={{ fontSize:11,padding:"2px 8px",borderRadius:10,background:"#fffaeb",border:"1px solid #e6d8a0",color:"#7a6028" }}>
+                                  {supEnts2.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>))}
+                                </span>
+                              )}
+                              <span style={{ fontSize:11,color:"#888" }}>↳ 訂購人: {buyerEnts.map(([n,q],j)=>(<span key={n}>{j>0 && ", "}{n}({q})</span>))}</span>
+                            </div>
+                            <span style={{ fontSize:14,color:"#ccc",transition:"transform .2s",transform:isExp2?"rotate(180deg)":"" }}>▾</span>
+                          </div>
+                          {isExp2 && (
+                            <div style={{ padding:"0 14px 12px",borderTop:"1px solid #f0ede8" }}>
+                              <div style={{ fontSize:11,color:"#888",margin:"8px 0 6px" }}>📅 各場次明細:</div>
+                              <div style={{ display:"flex",flexDirection:"column",gap:5 }}>
+                                {idn.orders.map((o,j) => (
+                                  <div key={j} style={{ display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"#faf9f6",borderRadius:6,fontSize:12 }}>
+                                    <span style={{ fontWeight:700,color:"#5a4a2a",flex:1 }}>{o.eventName}</span>
+                                    <span style={{ color:"#666" }}>訂購人:<b style={{color:"#7a6850"}}>{o.buyerName}</b></span>
+                                    <span style={{ color:"#888" }}>·</span>
+                                    {o.supplier && <span style={{ fontSize:10,padding:"1px 6px",borderRadius:4,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {o.supplier}</span>}
+                                    <span style={{ fontWeight:700,color:"#b8531a",minWidth:50,textAlign:"right" }}>{o.qty} 張</span>
+                                    <button onClick={()=>{setTab("active");setSearch("");setTimeout(()=>setExpandedId(o.eventId),50);}} style={{ fontSize:10,padding:"3px 8px",borderRadius:5,border:"1px solid #c4d0b0",background:"#e8f0e0",cursor:"pointer",color:"#5a7a3a",fontFamily:"inherit",fontWeight:600 }}>前往 →</button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {grandSupEnts.length>0&&(
                 <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"8px 14px",fontSize:12,color:"#7a6028" }}>
                   📦 上游總計 ({fb.length} 個訂購人):{grandSupEnts.map(([s,q],j)=>(<span key={s}>{j>0&&<span style={{opacity:.4,margin:"0 4px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b> 張</span>))}
