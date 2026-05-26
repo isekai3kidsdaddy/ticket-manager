@@ -912,6 +912,130 @@ const parseLineBlocks = (rawText) => {
   });
   return rows;
 };
+// 智慧自動偵測 parser — 處理「無 label」的多行人員資料
+// 例:
+//   萬姿妤
+//   A226124759
+//   0917-740-407
+//   jin20010407@hotmail.com（臉書）⚠ 被鎖
+//   (空行)
+//   薛媛仁
+//   ...
+// 每行可以是姓名/身分證/電話/email/會員號,沒空行也能 fallback 用「看到名字」分人
+const parseAutoDetectFormat = (rawText) => {
+  const lines = String(rawText || "").split(/\r?\n/).map(l => l.trim());
+  const persons = [];
+  let cur = {};
+  const finish = () => {
+    if (cur.name || cur.phone || cur.idNumber || cur.tixAccount) persons.push(cur);
+    cur = {};
+  };
+  const detectLogin = (s) => {
+    if (/臉書|facebook|^fb$|FB/i.test(s)) return "facebook";
+    if (/google|谷歌|gmail/i.test(s)) return "google";
+    return "";
+  };
+  const detectLocked = (s) => /🔒|帳號鎖|被鎖|鎖帳|帳號被鎖|被鎖了/.test(s);
+  const isLikelyName = (s) => {
+    if (s.length > 30 || s.length < 2) return false;
+    // 純中文 2-6 字
+    if (/^[\u4e00-\u9fa5·•‧]{2,7}$/.test(s)) return true;
+    // 中英混合(外籍含中文翻譯) 例:「KANA ANDO(安藤伽奈)」
+    if (/^[A-Za-z][A-Za-z\s·‧.\-]*\s*[\(（][\u4e00-\u9fa5]{2,8}[\)）]\s*$/.test(s)) return true;
+    // 純英文姓名 2-30 字
+    if (/^[A-Za-z][A-Za-z\s\-.,]{1,29}$/.test(s)) return true;
+    return false;
+  };
+  const isLikelyID = (s) => {
+    // 台灣身分證/居留證:1 字母 + 9 數字
+    if (/^[A-Za-z]\d{9}$/i.test(s)) return true;
+    // 護照/居留證:1-3 字母 + 6-9 數字 (有些可能含括號)
+    if (/^[A-Z]{1,3}\d{6,10}$/i.test(s.replace(/[()（）\-]/g, ""))) return true;
+    // 含 0/O 起頭等外籍 ID 例:OTT4273057
+    if (/^[O0][A-Z]{1,2}\d{6,10}$/i.test(s)) return true;
+    return false;
+  };
+  const isLikelyPhone = (s) => {
+    const c = s.replace(/[\s\-+()（）]/g, "");
+    if (!/^\d+$/.test(c)) return false;
+    if (/^09\d{8}$/.test(c)) return true;
+    if (/^886\d{9,10}$/.test(c)) return true;
+    if (/^\d{10,15}$/.test(c) && c.length >= 10) return true; // 國際號碼
+    return false;
+  };
+  const isLikelyEmail = (s) => /\S+@\S+\.\S+/.test(s);
+  const isLikelyMemberNo = (s) => /^(BA|MEMBER|M)[A-Z0-9]{6,15}$/i.test(s);
+
+  for (let line of lines) {
+    if (!line) { finish(); continue; }
+    if (line.startsWith("📌")) continue;
+    if (/^[【\[].+[】\]]\s*$/.test(line)) continue; // 區段標題
+
+    // 1️⃣ 嘗試 label 解析(支援「拓元帳號:xxx」「電話:xxx」等)
+    const labelMatch = line.match(/^([^:：]+?)\s*[:：]\s*(.+)$/);
+    if (labelMatch) {
+      const rawKey = labelMatch[1].trim();
+      const rawVal = labelMatch[2].trim();
+      const mapped = LINE_FIELD_MAP[rawKey];
+      if (mapped) {
+        // 「姓名」label 撞到時開新人
+        if (mapped === "name" && cur.name && cur.name !== rawVal) finish();
+        if (mapped === "tixAccount") {
+          // 嚴格 email 模式 — 不含中文/空白/全形括號
+          const em = rawVal.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+          if (em && !cur.tixAccount) cur.tixAccount = em[0];
+          else if (!cur.tixAccount) cur.tixAccount = rawVal;
+          // 後綴雜訊(臉書/Google/被鎖) 一併抽出
+          const rest = em ? rawVal.replace(em[0], "") : rawVal;
+          const lg = detectLogin(rest); if (lg && !cur.loginVia) cur.loginVia = lg;
+          if (detectLocked(rest)) cur.locked = true;
+        } else if (mapped === "phone") {
+          if (!cur.phone) cur.phone = normalizePhoneForImport(rawVal);
+        } else if (mapped === "idNumber") {
+          if (!cur.idNumber) cur.idNumber = rawVal.toUpperCase();
+        } else if (mapped === "qty") {
+          if (!cur.qty) cur.qty = normalizeQtyForImport(rawVal);
+        } else if (mapped === "loginVia") {
+          if (!cur.loginVia) cur.loginVia = normalizeLoginForImport(rawVal);
+        } else if (mapped === "locked") {
+          cur.locked = true;
+        } else {
+          if (!cur[mapped]) cur[mapped] = rawVal;
+        }
+        continue;
+      }
+    }
+
+    // 2️⃣ 無 label → 純內容判斷
+    // 如果是姓名 + 已有姓名 → 新人
+    if (isLikelyName(line) && cur.name) finish();
+
+    if (isLikelyName(line)) {
+      cur.name = line;
+    } else if (isLikelyID(line)) {
+      if (!cur.idNumber) cur.idNumber = line.toUpperCase().replace(/[()（）\-\s]/g, "");
+    } else if (isLikelyPhone(line)) {
+      if (!cur.phone) cur.phone = normalizePhoneForImport(line);
+    } else if (isLikelyEmail(line)) {
+      const em = line.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      if (em && !cur.tixAccount) cur.tixAccount = em[0];
+      const lg = detectLogin(line); if (lg && !cur.loginVia) cur.loginVia = lg;
+      if (detectLocked(line)) cur.locked = true;
+    } else if (isLikelyMemberNo(line)) {
+      if (!cur.memberNo) cur.memberNo = line.toUpperCase();
+    } else {
+      // 其他雜訊行 — 試著抓 login/lock
+      const lg = detectLogin(line); if (lg && !cur.loginVia) cur.loginVia = lg;
+      if (detectLocked(line)) cur.locked = true;
+      // 也試抓會員號 (格式不一定符合 isLikelyMemberNo)
+      const mm = line.match(/(?:會員\s*[#＃號編]?\s*[:：]?\s*)([A-Z0-9]{8,15})/i);
+      if (mm && !cur.memberNo) cur.memberNo = mm[1].toUpperCase();
+    }
+  }
+  finish();
+  return persons;
+};
+
 // 解析貼上內容:自動偵測是「LINE 原文」還是「試算表 TSV」還是「斜線一行式」
 // opts.ignoreSections: 斜線一行式裡的【區段】是否要當訂購人名?(預設 false → 用區段;true → 忽略,改用 defaultBuyer)
 const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "", opts = {}) => {
@@ -930,6 +1054,31 @@ const parseImportRows = (rawText, defaultBuyer = "", defaultAgent = "", opts = {
     // 預設訂購人/代購套用到每一列(已填的不蓋過)
     const applied = rows.map(r => ({ ...r, buyer: r.buyer || defaultBuyer.trim(), agent: r.agent || defaultAgent.trim() }));
     return { rows: applied, hasHeader: false, format: "line" };
+  }
+  // 偵測「智慧自動」: 沒 tab、沒「姓名:」label,但內容有電話/身分證/email 模式 → 用 auto-detect parser
+  const hasTab = /\t/.test(rawText);
+  const hasIDPat = /\b[A-Z]\d{9}\b/i.test(rawText);
+  const hasPhonePat = /\b09\d{8}\b/.test(rawText) || /\b09\d{2}[\s\-]\d{3}[\s\-]\d{3}\b/.test(rawText);
+  const hasEmail = /\S+@\S+\.\S+/.test(rawText);
+  const hasChineseName = /[\u4e00-\u9fa5]{2,5}/.test(rawText);
+  if (!hasTab && (hasIDPat || hasPhonePat || hasEmail) && hasChineseName) {
+    const persons = parseAutoDetectFormat(rawText);
+    const rows = persons.map((p, idx) => ({
+      idx,
+      raw: "",
+      buyer: defaultBuyer.trim(),
+      agent: defaultAgent.trim(),
+      agentSupplier: "",
+      name: p.name || "",
+      qty: p.qty || 1,
+      phone: p.phone || "",
+      idNumber: p.idNumber || "",
+      tixAccount: p.tixAccount || "",
+      loginVia: p.loginVia || "",
+      memberNo: p.memberNo || "",
+      locked: !!p.locked,
+    }));
+    return { rows, hasHeader: false, format: "auto" };
   }
   // 否則走原本 TSV 解析
   const lines = String(rawText).split(/\r?\n/).map(l => l.replace(/\s+$/,"")).filter(l => l.trim());
@@ -1102,9 +1251,10 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
           <span style={{ fontSize:12,color:"#888" }}>{event.name}</span>
         </div>
         <div style={{ fontSize:11,color:"#888",marginBottom:8,lineHeight:1.6 }}>
-          支援兩種格式 — 自動偵測:<br/>
+          支援多種格式 — 自動偵測:<br/>
           <b style={{color:"#666"}}>📋 試算表 TSV</b>:從 Google Sheet 整批複製;欄位「訂購人/<span style={{color:"#b8531a"}}>代購</span>/姓名/拿幾張/電話/身分證/拓元/登入/鎖」<br/>
           <b style={{color:"#666"}}>💬 LINE 原文</b>:客人直接傳的「姓名: / 電話: / <span style={{color:"#b8531a"}}>代購:</span> / 身分證:...」,多人空行分隔<br/>
+          <b style={{color:"#666"}}>🧠 智慧自動</b>:純資料無 label 也可以(姓名/身分證/電話/email 各一行),空行分人<br/>
           智能修補:電話砍 0、登入方式 FB/Google 都認得 · <b style={{color:"#b8531a"}}>「代購」欄填的話 → 該筆變成「細項實名」放在識別人底下</b>
         </div>
         <div style={{ background:"#f7f3ec",borderRadius:7,padding:"6px 10px",fontSize:11,marginBottom:8,color:"#7a6850" }}>
@@ -1145,6 +1295,7 @@ function BatchImportIdentityModal({ event, onClose, onConfirm }) {
                 {errorCount>0 && <> · <span style={{color:"#c47070"}}>{errorCount} 缺姓名</span></>}
                 {dupCount>0 && <> · <span style={{color:"#c89030"}}>{dupCount} 重複</span></>}
                 {skippedCount>0 && <> · <span style={{color:"#999"}}>{skippedCount} 跳過</span></>}
+                {parsed.format === "auto" && <span style={{color:"#5a7a5a",marginLeft:6}}>(智慧自動 — 無 label 純資料,依內容識別)</span>}
                 {parsed.format === "slashline" && <span style={{color:"#5a7a5a",marginLeft:6}}>(斜線一行式 — 含【區段】訂購人)</span>}
                 {parsed.format === "line" && <span style={{color:"#5a7a5a",marginLeft:6}}>(LINE 原文)</span>}
                 {parsed.format === "tsv" && parsed.hasHeader && <span style={{color:"#5a7a5a",marginLeft:6}}>(TSV 已辨識表頭)</span>}
