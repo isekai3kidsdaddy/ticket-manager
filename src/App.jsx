@@ -677,6 +677,130 @@ const normalizeLockedForImport = (raw) => {
   const v = String(raw).trim().toLowerCase();
   return ["是","✓","✔","true","1","y","yes","lock","鎖","已鎖"].includes(v);
 };
+// 合併場次 Modal — 把目前場次併入另一個場次
+function MergeEventModal({ fromEvent, allEvents, onClose, onConfirm }) {
+  const [targetId, setTargetId] = useState("");
+  const candidates = useMemo(() => {
+    // 排除自己,排除已完成的;按名字相似度 + 字數差排序(同名最前)
+    const fromNorm = (fromEvent.name || "").trim().toLowerCase();
+    return (allEvents || [])
+      .filter(e => e.id !== fromEvent.id)
+      .map(e => {
+        const eNorm = (e.name || "").trim().toLowerCase();
+        const exact = eNorm === fromNorm;
+        const contains = !exact && (eNorm.includes(fromNorm) || fromNorm.includes(eNorm));
+        const totalQ = (e.buyers || []).reduce((s, b) => s + (b.qty || 0), 0);
+        return { ...e, _exact: exact, _contains: contains, _totalQ: totalQ };
+      })
+      .sort((a, b) => {
+        if (a._exact !== b._exact) return a._exact ? -1 : 1;
+        if (a._contains !== b._contains) return a._contains ? -1 : 1;
+        return (a.name||"").localeCompare(b.name||"", "zh-TW");
+      });
+  }, [fromEvent, allEvents]);
+  const fromQ = (fromEvent.buyers || []).reduce((s, b) => s + (b.qty || 0), 0);
+  const targetEvt = candidates.find(e => e.id === targetId);
+  return (
+    <div onClick={onClose} style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16 }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:12,padding:"20px 22px",maxWidth:560,width:"100%",maxHeight:"85vh",overflow:"auto",boxShadow:"0 8px 30px rgba(0,0,0,.2)",fontFamily:"inherit" }}>
+        <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8 }}>
+          <h3 style={{ margin:0,fontSize:16,fontWeight:700,color:"#2d2a26" }}>🔗 合併場次</h3>
+          <button onClick={onClose} style={{ background:"none",border:"none",fontSize:20,cursor:"pointer",color:"#999",lineHeight:1 }}>×</button>
+        </div>
+        <p style={{ fontSize:12,color:"#666",margin:"0 0 14px",lineHeight:1.6 }}>
+          要把【<b style={{color:"#b8531a"}}>{fromEvent.name}</b>】({fromQ} 張) 併入哪一個場次?<br/>
+          <span style={{ color:"#888" }}>合併後同名訂購人會自動合 batches + identities,本場次會被刪除。</span>
+        </p>
+        <div style={{ marginBottom:12 }}>
+          <span style={{ fontSize:11,color:"#888",marginBottom:6,display:"block" }}>選擇要併入的場次:</span>
+          <select value={targetId} onChange={e=>setTargetId(e.target.value)}
+            style={{ width:"100%",padding:"8px 10px",borderRadius:7,border:"1px solid #c4b89a",fontSize:13,fontFamily:"inherit",background:"#fffdf5" }}>
+            <option value="">(請選擇)</option>
+            {candidates.map(c => (
+              <option key={c.id} value={c.id}>
+                {c._exact ? "⭐ " : c._contains ? "🔸 " : ""}{c.name} · {c._totalQ} 張 · {c.status === "done" ? "已完成" : c.status === "picked" ? "已取票" : "進行中"}
+              </option>
+            ))}
+          </select>
+        </div>
+        {targetEvt && (
+          <div style={{ padding:"10px 12px",background:"#f5f0e0",borderRadius:7,marginBottom:14,fontSize:12,color:"#5a4a2a",lineHeight:1.6 }}>
+            <b>合併預覽:</b><br/>
+            ・「{fromEvent.name}」<b style={{color:"#b8531a"}}>{fromQ}</b> 張 → 併入「{targetEvt.name}」<b>{targetEvt._totalQ}</b> 張<br/>
+            ・合併後「{targetEvt.name}」共 <b style={{color:"#b8531a"}}>{fromQ + targetEvt._totalQ}</b> 張<br/>
+            ・同名訂購人會自動合併(例:妙 18 + 妙 110 = 妙 128)<br/>
+            ・原本的「{fromEvent.name}」場次會刪除
+          </div>
+        )}
+        <div style={{ display:"flex",gap:8 }}>
+          <button onClick={onClose} style={{ flex:1,padding:"9px 14px",borderRadius:7,border:"1px solid #d4d0c8",background:"#faf9f6",cursor:"pointer",fontSize:12,fontWeight:700,color:"#666",fontFamily:"inherit" }}>取消</button>
+          <button disabled={!targetId} onClick={()=>{onConfirm(targetId);onClose();}}
+            style={{ flex:2,padding:"9px 14px",borderRadius:7,border:"1px solid #5a8055",background:targetId?"#e6f0e0":"#eee",cursor:targetId?"pointer":"not-allowed",fontSize:12,fontWeight:700,color:targetId?"#3a5a35":"#aaa",fontFamily:"inherit",opacity:targetId?1:.5 }}>✓ 確認合併</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 批次供應方快編 Modal — 點 buyer 上方的「佩盈姐 110」badge 開啟
+function BatchSupplierEditor({ event, buyer, onChange, onClose }) {
+  // 從整場次蒐集已知上游(給下拉用)
+  const knownSuppliers = useMemo(() => {
+    const set = new Set();
+    (event.buyers || []).forEach(bb => {
+      (bb.batches || []).forEach(bt => {
+        const m = (bt.detail || "").match(/([^\s·]+?)供/);
+        if (m) set.add(m[1]);
+      });
+      (bb.identities || []).forEach(it => { if (it.supplier) set.add(it.supplier); });
+    });
+    return Array.from(set).sort((a,b)=>a.localeCompare(b, "zh-TW"));
+  }, [event]);
+  const batches = buyer.batches || [];
+  const getSup = (detail) => {
+    const m = (detail || "").match(/([^\s·]+?)供/);
+    return m ? m[1] : "";
+  };
+  return (
+    <div onClick={onClose} style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16 }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:12,padding:"20px 22px",maxWidth:520,width:"100%",maxHeight:"80vh",overflow:"auto",boxShadow:"0 8px 30px rgba(0,0,0,.2)",fontFamily:"inherit" }}>
+        <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12 }}>
+          <h3 style={{ margin:0,fontSize:16,fontWeight:700,color:"#2d2a26" }}>📦 編輯各批次上游 — {buyer.name}</h3>
+          <button onClick={onClose} style={{ background:"none",border:"none",fontSize:20,cursor:"pointer",color:"#999",lineHeight:1 }}>×</button>
+        </div>
+        <p style={{ fontSize:12,color:"#888",margin:"0 0 14px",lineHeight:1.5 }}>每筆分批可獨立設定上游。改完關掉視窗就好,會即時存。<br/>例:同一批 10 張可分成「君儀姐 6 + 佩盈姐 4」 → 各自分批設定。</p>
+        <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
+          {batches.map((bt, bi) => {
+            const cur = getSup(bt.detail);
+            const otherDetail = (bt.detail || "").replace(/[^\s·]+?供\s*/g, "").trim();
+            return (
+              <div key={bi} style={{ display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:"#faf9f6",borderRadius:7,border:"1px solid #e4e0d8",flexWrap:"wrap" }}>
+                <span style={{ fontSize:12,fontWeight:700,color:"#666",minWidth:60 }}>分批 #{bi+1}</span>
+                <span style={{ fontSize:12,color:"#555" }}><b>{bt.qty || 0}</b> 張</span>
+                <span style={{ fontSize:10,color:"#aaa" }}>·</span>
+                <span style={{ fontSize:11,color:"#888" }}>上游:</span>
+                <select value={cur} onChange={e=>onChange(bi, e.target.value)}
+                  style={{ padding:"4px 8px",borderRadius:5,border:"1px solid #c4b89a",fontSize:12,fontFamily:"inherit",background:"#fff",cursor:"pointer" }}>
+                  <option value="">(未設定)</option>
+                  {knownSuppliers.map(s => <option key={s} value={s}>{s}</option>)}
+                  {cur && !knownSuppliers.includes(cur) && <option value={cur}>{cur}</option>}
+                </select>
+                <input value={cur} onChange={e=>onChange(bi, e.target.value)} placeholder="或自填新上游" style={{ padding:"4px 8px",borderRadius:5,border:"1px solid #d4cdb8",fontSize:11,fontFamily:"inherit",background:"#fff",width:100 }}/>
+                {otherDetail && <span style={{ fontSize:10,color:"#999",fontStyle:"italic" }}>(另含備註:「{otherDetail}」)</span>}
+              </div>
+            );
+          })}
+        </div>
+        {batches.length === 0 && <div style={{ fontSize:12,color:"#888",padding:"20px 0",textAlign:"center" }}>還沒有分批 — 先用「＋ 分批」加一筆</div>}
+        <div style={{ marginTop:14,padding:"8px 10px",background:"#f5f0e0",borderRadius:6,fontSize:11,color:"#7a6028",lineHeight:1.5 }}>
+          💡 想加新上游?關掉此視窗 → 按「<b>＋ 分批</b>」新增一筆 → 再回來這裡選上游
+        </div>
+        <button onClick={onClose} style={{ marginTop:14,padding:"8px 16px",borderRadius:7,border:"1px solid #d4d0c8",background:"#faf9f6",cursor:"pointer",fontSize:12,fontWeight:700,color:"#666",fontFamily:"inherit",width:"100%" }}>完成</button>
+      </div>
+    </div>
+  );
+}
+
 const normalizeQtyForImport = (raw) => {
   const n = parseInt(String(raw||"").trim(), 10);
   return Number.isFinite(n) && n > 0 ? n : 1;
@@ -1529,6 +1653,8 @@ function MainApp() {
   const [nameVal, setNameVal] = useState("");
   const [addingBatch, setAddingBatch] = useState(null);  // {eventId, idx}
   const [editingBatch, setEditingBatch] = useState(null); // {eventId, idx, bi}
+  const [supplierEditModal, setSupplierEditModal] = useState(null); // {eventId, buyerIdx} — 批次供應方快編
+  const [mergeEventModal, setMergeEventModal] = useState(null); // {fromEventId}
   const [expandedIdentity, setExpandedIdentity] = useState(null); // identity key
   const [expandedSubItem, setExpandedSubItem] = useState(null); // subItem key
   const [editingCatalogKey, setEditingCatalogKey] = useState(null); // 實名簿正在編輯的 key
@@ -3076,6 +3202,48 @@ function MainApp() {
     setConfirmModal({ msg: `確定要刪除「${getEventName(eventId)}」嗎？可透過紀錄還原。`, onYes: () => { addLog(`刪除場次【${getEventName(eventId)}】`, snap()); recordEventAction(eventId, "delete"); setEvents(evs => evs.filter(e => e.id !== eventId)); setConfirmModal(null); } });
   };
 
+  // 合併兩個場次:把 fromEvent 全部買家/分批/識別人灌進 toEvent → 同名訂購人自動合 batches+identities
+  // 完成後 fromEvent 刪除
+  const mergeIntoEvent = (fromId, toId) => {
+    const fromEvt = events.find(e => e.id === fromId);
+    const toEvt = events.find(e => e.id === toId);
+    if (!fromEvt || !toEvt || fromId === toId) return;
+    addLog(`🔗 合併場次:【${fromEvt.name}】(${(fromEvt.buyers||[]).reduce((s,b)=>s+(b.qty||0),0)}張) → 併入【${toEvt.name}】`, snap());
+    setEvents(evs => {
+      const next = [...evs];
+      const toIdx = next.findIndex(e => e.id === toId);
+      if (toIdx < 0) return evs;
+      const merged = { ...next[toIdx] };
+      merged.buyers = [...(merged.buyers || [])];
+      // 對 fromEvent 每個 buyer:同名就併、不同名就 append
+      (fromEvt.buyers || []).forEach(fb => {
+        const tIdx = merged.buyers.findIndex(tb => (tb.name||"").trim().toLowerCase() === (fb.name||"").trim().toLowerCase());
+        if (tIdx >= 0) {
+          // 合併 batches + identities
+          const existing = merged.buyers[tIdx];
+          const allBatches = [...(existing.batches || []), ...(fb.batches || [])];
+          const allIdentities = [...(existing.identities || []), ...(fb.identities || [])];
+          const totalQ = allBatches.reduce((s, bt) => s + (bt.qty || 0), 0);
+          merged.buyers[tIdx] = {
+            ...existing,
+            qty: totalQ,
+            batches: allBatches,
+            identities: allIdentities,
+          };
+        } else {
+          merged.buyers.push({ ...fb });
+        }
+      });
+      // 上游 supplierBatches 全部接上
+      if (Array.isArray(fromEvt.supplierBatches) && fromEvt.supplierBatches.length > 0) {
+        merged.supplierBatches = [...(merged.supplierBatches || []), ...fromEvt.supplierBatches];
+      }
+      next[toIdx] = merged;
+      // 刪掉 fromEvent
+      return next.filter(e => e.id !== fromId);
+    });
+  };
+
   const undoTo = (log) => {
     // 計算這個還原點之後（時間更新）的異動數
     const newerCount = (logs || []).filter(l => l.time > log.time).length;
@@ -3753,10 +3921,12 @@ function MainApp() {
                           const ents = Object.entries(supTotals);
                           if (ents.length === 0) return null;
                           return (
-                            <span style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0" }}>
+                            <span onClick={()=>setSupplierEditModal({eventId:evt.id,buyerIdx:i})} title="點此編輯各批次的上游"
+                              style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0",cursor:"pointer" }}>
                               {ents.map(([s,q],j) => (
                                 <span key={s}>{j>0 && <span style={{opacity:.4,margin:"0 3px"}}>·</span>}<span style={{color:"#7a6850"}}>{s}</span> <b style={{color:"#b8531a"}}>{q}</b></span>
                               ))}
+                              <span style={{ opacity:.5,marginLeft:5 }}>✎</span>
                             </span>
                           );
                         })()}
@@ -3859,9 +4029,15 @@ function MainApp() {
                                     <span style={{ fontSize:11,fontWeight:700,minWidth:36,textAlign:"center",color:"#666" }}>{itQty} 張</span>
                                     <button onClick={(e)=>{e.stopPropagation();updateIdentity(evt.id,i,it.id,{qty:itQty+1});}} style={{ width:20,height:20,borderRadius:4,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,color:"#666",fontFamily:"inherit",lineHeight:1 }}>+</button>
                                   </div>
-                                  {/* 上游 badge — 哪個上游供貨 (僅 4 層 mode) */}
+                                  {/* 上游 badge — 哪個上游供貨 (僅 4 層 mode) — 點下去展開可編輯 */}
                                   {is4LayerMode && it.supplier && (
-                                    <span style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0" }}>📦 {it.supplier}</span>
+                                    <span onClick={()=>setExpandedIdentity(isOpen?null:ekey)} title="點此編輯上游"
+                                      style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fffaeb",color:"#7a6028",border:"1px solid #e6d8a0",cursor:"pointer" }}>📦 {it.supplier} ✎</span>
+                                  )}
+                                  {/* 沒設上游的識別人 → 顯示「+ 上游」快捷 */}
+                                  {is4LayerMode && !it.supplier && (
+                                    <span onClick={()=>setExpandedIdentity(isOpen?null:ekey)} title="點此設定上游"
+                                      style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fafafa",color:"#999",border:"1px dashed #ccc",cursor:"pointer" }}>+ 上游</span>
                                   )}
                                   {/* 細項實名指示器 (僅 4 層 mode 顯示) */}
                                   {is4LayerMode && subItems.length > 0 && (
@@ -4109,6 +4285,7 @@ function MainApp() {
                   {evt.status==="picked"&&<button onClick={()=>setEventStatus(evt.id,"done")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4d9c4",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:600,color:"#5a7a5a",fontFamily:"inherit" }}>✓ 退費完成，結案</button>}
                   {evt.status==="done"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 移到已取票</button>}
                   {(evt.status==="picked"||evt.status==="done")&&<button onClick={()=>setEventStatus(evt.id,"active")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>↩ 移回進行中</button>}
+                  <button onClick={()=>setMergeEventModal({fromEventId:evt.id})} title="把此場次併入另一個場次(同名訂購人會自動合 batches+identities)" style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fffaeb",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b6a2d",fontFamily:"inherit" }}>🔗 合併</button>
                   <button onClick={()=>deleteEvent(evt.id)} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #e8c4c4",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>刪除</button>
                   {!evt.note&&<button onClick={()=>setInputModal({title:"新增場次備註",label:"備註",defaultValue:"",onSave:v=>{if(v)updateEvent(evt.id,e=>{e.note=v;return e;});setInputModal(null);}})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>＋ 備註</button>}
                 </div>
@@ -4500,6 +4677,29 @@ function MainApp() {
       {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
       {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
       {identityLinkModal&&(()=>{const e=events.find(x=>x.id===identityLinkModal.eventId);const b=e?.buyers?.[identityLinkModal.buyerIdx];const it=b?.identities?.find(x=>x.id===identityLinkModal.identityId);return e&&b&&it?<IdentityRealnameLinkModal event={e} buyer={b} identity={it} onClose={()=>setIdentityLinkModal(null)} onRegenerate={()=>regenerateIdentityRealnameLink(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)}/>:null;})()}
+      {supplierEditModal && (()=>{
+        const e = events.find(x => x.id === supplierEditModal.eventId);
+        const b = e?.buyers?.[supplierEditModal.buyerIdx];
+        if (!e || !b) return null;
+        const onChange = (bi, newSupplier) => {
+          updateEvent(e.id, ev => {
+            const batches = [...(ev.buyers[supplierEditModal.buyerIdx].batches || [])];
+            const old = batches[bi].detail || "";
+            // 移除舊的「X供」部分,加上新的(若有)
+            const cleaned = old.replace(/[^\s·]+?供\s*/g, "").trim();
+            const newDetail = newSupplier.trim() ? `${newSupplier.trim()}供${cleaned ? " " + cleaned : ""}` : cleaned;
+            batches[bi] = { ...batches[bi], detail: newDetail };
+            ev.buyers[supplierEditModal.buyerIdx] = { ...ev.buyers[supplierEditModal.buyerIdx], batches };
+            return ev;
+          });
+        };
+        return <BatchSupplierEditor event={e} buyer={b} onChange={onChange} onClose={()=>setSupplierEditModal(null)}/>;
+      })()}
+      {mergeEventModal && (()=>{
+        const fromEvt = events.find(x => x.id === mergeEventModal.fromEventId);
+        if (!fromEvt) return null;
+        return <MergeEventModal fromEvent={fromEvt} allEvents={events} onClose={()=>setMergeEventModal(null)} onConfirm={(toId)=>mergeIntoEvent(fromEvt.id, toId)}/>;
+      })()}
       {dataDiffModal&&dataDiff&&!dataDiff.noPayload&&<DataDiffModal diff={dataDiff} onClose={()=>setDataDiffModal(null)} onRestore={(key)=>{setConfirmModal({msg:`確定要還原到 ${key} 的快照嗎?\n\n${key} 之後的所有變更都會消失。建議先 💾 匯出備份再操作。`,yesLabel:"確定還原",onYes:()=>{restoreFromDaily(key);setConfirmModal(null);setDataDiffModal(null);}});}}/>}
     </div>
   );
