@@ -2680,7 +2680,7 @@ function MainApp() {
     const map = new Map();
     events.forEach(evt => {
       (evt.buyers || []).forEach(b => {
-        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0, supplierTotals: {} });
+        if (!map.has(b.name)) map.set(b.name, { name: b.name, orders: [], totalQty: 0, unpaidQty: 0, refundCount: 0, refundedCount: 0, pickedQty: 0, supplierTotals: {}, identityNames: new Set() });
         const entry = map.get(b.name);
         const bs = getBatches(b);
         entry.orders.push({ eventId: evt.id, eventName: evt.name, eventStatus: evt.status, eventPrice: evt.price, qty: buyerTotalQty(b), batches: bs, note: b.note, addedAt: b.addedAt });
@@ -2696,6 +2696,11 @@ function MainApp() {
             const sup = m[1];
             entry.supplierTotals[sup] = (entry.supplierTotals[sup] || 0) + (x.qty || 0);
           }
+        });
+        // 收集識別人 + 細項實名的姓名 → 給訂購人分頁的搜尋用
+        (b.identities || []).forEach(it => {
+          if (it.name) entry.identityNames.add(it.name);
+          (it.subItems || []).forEach(si => { if (si.name) entry.identityNames.add(si.name); });
         });
       });
     });
@@ -4342,10 +4347,12 @@ function MainApp() {
         {!showLog&&tab==="buyers"&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
           {(()=>{
             const s=search.toLowerCase();
-            // 搜尋:訂購人名 或 上游名(支援搜「君儀」→ 找出所有有君儀供貨的訂購人)
+            // 搜尋:訂購人名 / 上游名 / 識別人(代購)/ 細項實名姓名
+            // 例:搜「萬陽」→ 找出所有底下有「萬陽」識別人或細項實名的訂購人
             const fb=search?buyersAggregated.filter(b=>
               b.name.toLowerCase().includes(s) ||
-              Object.keys(b.supplierTotals||{}).some(sup => sup.toLowerCase().includes(s))
+              Object.keys(b.supplierTotals||{}).some(sup => sup.toLowerCase().includes(s)) ||
+              Array.from(b.identityNames||[]).some(nm => nm.toLowerCase().includes(s))
             ):buyersAggregated;
             if(fb.length===0)return <div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有訂購人"}</div>;
             // 跨所有訂購人的上游總計 (供搜尋過濾後的小摘要)
@@ -4362,6 +4369,8 @@ function MainApp() {
               const isExp=expandedId===`buyer-${buyer.name}`;
               const bc=buyer.unpaidQty>0?"#c47070":buyer.refundCount>0?"#c4a040":"#8b7355";
               const supEnts=Object.entries(buyer.supplierTotals||{}).sort((a,b)=>b[1]-a[1]);
+              // 若搜尋是因為某個識別人名匹配上的,把命中的代購列出來給使用者線索
+              const matchedIdentities = search ? Array.from(buyer.identityNames||[]).filter(nm => nm.toLowerCase().includes(s) && !buyer.name.toLowerCase().includes(s)) : [];
               return (<div key={buyer.name} className="anim-in" style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${bc}` }}>
                 <div onClick={()=>setExpandedId(isExp?null:`buyer-${buyer.name}`)} style={{ padding:"14px 18px",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center" }}>
                   <div style={{ flex:1 }}>
@@ -4378,6 +4387,11 @@ function MainApp() {
                       {buyer.refundedCount>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#dfeadf",color:"#4a6b4a" }}>已退款 {buyer.refundedCount}筆</span>}
                       {buyer.pickedQty>0&&<span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:12,background:"#e0eef6",color:"#2d6a8b" }}>已取票 {buyer.pickedQty}張</span>}
                     </div>
+                    {matchedIdentities.length > 0 && (
+                      <div style={{ marginTop:6,fontSize:11,color:"#7a6028",padding:"3px 8px",background:"#fffaeb",borderRadius:6,border:"1px solid #e6d8a0",display:"inline-block" }}>
+                        🔍 命中代購: <b>{matchedIdentities.join(" · ")}</b>
+                      </div>
+                    )}
                     {!isExp&&<div style={{ marginTop:6,display:"flex",flexWrap:"wrap",gap:4 }}>
                       {buyer.orders.slice(0,10).map((o,i)=>{const sc=BUYER_STATUS[o.st]||BUYER_STATUS.normal;return <span key={i} style={{ fontSize:12,padding:"2px 8px",borderRadius:10,background:sc.bg,color:sc.color,fontWeight:o.st!=="normal"?600:400 }}>{o.eventName}×{o.qty}</span>;})}
                       {buyer.orders.length>10&&<span style={{ fontSize:12,color:"#999",padding:"2px 4px" }}>+{buyer.orders.length-10}</span>}
