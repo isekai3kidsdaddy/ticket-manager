@@ -273,6 +273,9 @@ function RealnameFormPage({ token }) {
   const [savedAt, setSavedAt] = useState(null);
   // 模式:"buyer" 填 identities; "identity" 填某個 identity 底下的 subItems(細項實名)
   const [mode, setMode] = useState("buyer");
+  // 是否載入了既有資料(編輯模式 → 上次有填過)
+  const [loadedFromExisting, setLoadedFromExisting] = useState(false);
+  const [originalCount, setOriginalCount] = useState(0);
 
   useEffect(() => { loadByToken(); /* eslint-disable-next-line */ }, [token]);
 
@@ -307,12 +310,15 @@ function RealnameFormPage({ token }) {
         const existing = foundIdentity.subItems || [];
         if (existing.length > 0) {
           setIdentities(existing.map(it => ({ ...it })));
+          setLoadedFromExisting(true);
+          setOriginalCount(existing.length);
         } else {
           const blanks = [];
           for (let i = 0; i < totalQty; i++) {
             blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
           }
           setIdentities(blanks);
+          setLoadedFromExisting(false);
         }
       } else {
         // buyer-level token (現有行為):填 identities
@@ -322,12 +328,15 @@ function RealnameFormPage({ token }) {
         const existing = foundBuyer.identities || [];
         if (existing.length > 0) {
           setIdentities(existing.map(it => ({ ...it })));
+          setLoadedFromExisting(true);
+          setOriginalCount(existing.length);
         } else {
           const blanks = [];
           for (let i = 0; i < totalQty; i++) {
             blanks.push({ id: `tmp_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
           }
           setIdentities(blanks);
+          setLoadedFromExisting(false);
         }
       }
     } catch (e) {
@@ -393,7 +402,7 @@ function RealnameFormPage({ token }) {
         submitLog = {
           id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
           time: Date.now(),
-          msg: `📩 【${evName}】${buyerName} → ${identityName} 透過實名連結提交 ${submitted.length} 筆細項實名`,
+          msg: `📩 【${evName}】${buyerName} → ${identityName} 透過實名連結${loadedFromExisting?"更新":"提交"} ${submitted.length} 筆細項實名`,
           snapshot: null,
         };
       } else {
@@ -411,7 +420,7 @@ function RealnameFormPage({ token }) {
         submitLog = {
           id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
           time: Date.now(),
-          msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結提交 ${submitted.length} 筆`,
+          msg: `📩 「${freshEvents[eIdx].buyers[bIdx].name}」透過實名連結${loadedFromExisting?"更新":"提交"} ${submitted.length} 筆`,
           snapshot: null,
         };
       }
@@ -471,6 +480,28 @@ function RealnameFormPage({ token }) {
             </>
           )}
         </div>
+
+        {loadedFromExisting && (
+          <div style={{ background:"#fff9ec",border:"1px solid #e4d4a0",borderRadius:10,padding:"12px 14px",marginBottom:12,boxShadow:"0 1px 6px rgba(0,0,0,.04)" }}>
+            <div style={{ display:"flex",alignItems:"flex-start",gap:10 }}>
+              <span style={{ fontSize:20,lineHeight:1 }}>✏️</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13,fontWeight:700,color:"#7a6028",marginBottom:4 }}>編輯模式</div>
+                <div style={{ fontSize:11,color:"#8b6a2d",lineHeight:1.5 }}>已自動載入上次填過的 <b>{originalCount} 筆</b>實名資料,可直接修改任一欄位後重新送出。<br/>想換人?直接改名字、身分證、電話等;不需要某一份?點該份右上「✕」刪除;想全部重來?按下方「🔄 清空重填」</div>
+                <button onClick={()=>{
+                  if (!confirm(`確定要清空所有已填的 ${identities.length} 筆,重新從空白開始嗎?\n\n(送出前不會影響原本的資料,送出後才會覆蓋)`)) return;
+                  const totalQ = eventInfo?.totalQty || 1;
+                  const blanks = [];
+                  for (let i = 0; i < totalQ; i++) {
+                    blanks.push({ id: `tmp_reset_${i}_${Math.random().toString(36).slice(2,6)}`, name:"", phone:"", idNumber:"", tixAccount:"", loginVia:"", locked:false, memberNo:"", qty:1 });
+                  }
+                  setIdentities(blanks);
+                  setLoadedFromExisting(false);
+                }} style={{ marginTop:8,padding:"5px 12px",borderRadius:6,border:"1px solid #c89030",background:"#fffaeb",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>🔄 清空重填</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {identities.map((it, idx) => (
           <div key={it.id || idx} style={{ background:"#fff",padding:"14px 16px",borderRadius:10,marginBottom:10,boxShadow:"0 1px 6px rgba(0,0,0,.04)" }}>
