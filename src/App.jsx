@@ -921,14 +921,22 @@ const parseLineBlocks = (rawText) => {
 //   (空行)
 //   薛媛仁
 //   ...
+// 也支援「label 自己一行 + 下一行是值」(常見人偷懶寫法):
+//   王雨喬
+//   E124230701
+//   0928128057
+//   拓元帳號            ← label 自己一行
+//   famlist26307@yahoo.com.tw(FB）  ← 下一行是值,自動掛回去
 // 每行可以是姓名/身分證/電話/email/會員號,沒空行也能 fallback 用「看到名字」分人
 const parseAutoDetectFormat = (rawText) => {
   const lines = String(rawText || "").split(/\r?\n/).map(l => l.trim());
   const persons = [];
   let cur = {};
+  let pendingLabel = null; // 上一行是「純 label」,本行的值要套到這個 mapped field
   const finish = () => {
     if (cur.name || cur.phone || cur.idNumber || cur.tixAccount) persons.push(cur);
     cur = {};
+    pendingLabel = null;
   };
   const detectLogin = (s) => {
     if (/臉書|facebook|^fb$|FB/i.test(s)) return "facebook";
@@ -965,11 +973,51 @@ const parseAutoDetectFormat = (rawText) => {
   };
   const isLikelyEmail = (s) => /\S+@\S+\.\S+/.test(s);
   const isLikelyMemberNo = (s) => /^(BA|MEMBER|M)[A-Z0-9]{6,15}$/i.test(s);
+  // 給 pendingLabel 把值套到 cur
+  const applyValueToField = (mappedField, rawVal) => {
+    if (mappedField === "tixAccount") {
+      const em = rawVal.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      if (em && !cur.tixAccount) cur.tixAccount = em[0];
+      else if (!cur.tixAccount) cur.tixAccount = rawVal;
+      const rest = em ? rawVal.replace(em[0], "") : rawVal;
+      const lg = detectLogin(rest); if (lg && !cur.loginVia) cur.loginVia = lg;
+      if (detectLocked(rest)) cur.locked = true;
+    } else if (mappedField === "phone") {
+      if (!cur.phone) cur.phone = normalizePhoneForImport(rawVal);
+    } else if (mappedField === "idNumber") {
+      if (!cur.idNumber) cur.idNumber = rawVal.toUpperCase();
+    } else if (mappedField === "qty") {
+      if (!cur.qty) cur.qty = normalizeQtyForImport(rawVal);
+    } else if (mappedField === "loginVia") {
+      if (!cur.loginVia) cur.loginVia = normalizeLoginForImport(rawVal);
+    } else if (mappedField === "locked") {
+      cur.locked = true;
+    } else if (mappedField === "name") {
+      if (cur.name && cur.name !== rawVal) finish();
+      cur.name = rawVal;
+    } else {
+      if (!cur[mappedField]) cur[mappedField] = rawVal;
+    }
+  };
 
   for (let line of lines) {
     if (!line) { finish(); continue; }
     if (line.startsWith("📌")) continue;
     if (/^[【\[].+[】\]]\s*$/.test(line)) continue; // 區段標題
+
+    // 0️⃣ 如果上一行是純 label (例「拓元帳號」)→ 把本行當作該 label 的值
+    if (pendingLabel) {
+      applyValueToField(pendingLabel, line);
+      pendingLabel = null;
+      continue;
+    }
+
+    // 0.5️⃣ 本行是純 label (LINE_FIELD_MAP key 完全相符,沒冒號)→ 設 pendingLabel,等下一行
+    //     優先級高於姓名偵測,避免「拓元帳號」被當成姓名
+    if (LINE_FIELD_MAP[line]) {
+      pendingLabel = LINE_FIELD_MAP[line];
+      continue;
+    }
 
     // 1️⃣ 嘗試 label 解析(支援「拓元帳號:xxx」「電話:xxx」等)
     const labelMatch = line.match(/^([^:：]+?)\s*[:：]\s*(.+)$/);
@@ -977,33 +1025,7 @@ const parseAutoDetectFormat = (rawText) => {
       const rawKey = labelMatch[1].trim();
       const rawVal = labelMatch[2].trim();
       const mapped = LINE_FIELD_MAP[rawKey];
-      if (mapped) {
-        // 「姓名」label 撞到時開新人
-        if (mapped === "name" && cur.name && cur.name !== rawVal) finish();
-        if (mapped === "tixAccount") {
-          // 嚴格 email 模式 — 不含中文/空白/全形括號
-          const em = rawVal.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-          if (em && !cur.tixAccount) cur.tixAccount = em[0];
-          else if (!cur.tixAccount) cur.tixAccount = rawVal;
-          // 後綴雜訊(臉書/Google/被鎖) 一併抽出
-          const rest = em ? rawVal.replace(em[0], "") : rawVal;
-          const lg = detectLogin(rest); if (lg && !cur.loginVia) cur.loginVia = lg;
-          if (detectLocked(rest)) cur.locked = true;
-        } else if (mapped === "phone") {
-          if (!cur.phone) cur.phone = normalizePhoneForImport(rawVal);
-        } else if (mapped === "idNumber") {
-          if (!cur.idNumber) cur.idNumber = rawVal.toUpperCase();
-        } else if (mapped === "qty") {
-          if (!cur.qty) cur.qty = normalizeQtyForImport(rawVal);
-        } else if (mapped === "loginVia") {
-          if (!cur.loginVia) cur.loginVia = normalizeLoginForImport(rawVal);
-        } else if (mapped === "locked") {
-          cur.locked = true;
-        } else {
-          if (!cur[mapped]) cur[mapped] = rawVal;
-        }
-        continue;
-      }
+      if (mapped) { applyValueToField(mapped, rawVal); continue; }
     }
 
     // 2️⃣ 無 label → 純內容判斷
