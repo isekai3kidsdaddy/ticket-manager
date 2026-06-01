@@ -1707,9 +1707,19 @@ function IdentityExportModal({ events, title, onClose }) {
   const headers = hasAgent
     ? ["場次","訂購人","代購","上游","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"]
     : ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  // 把純數字字串包成 ="..." 強制 Excel/Google Sheet 視為文字,避免:
+  //   1) 電話「0903...」前面的 0 被吃掉變 903...
+  //   2) 長數字被當成科學記號 (1.23E+10) 或加 .00
+  // 字串本身或有英文/符號的不包(身分證 A123... 或 email 不會被誤判)
+  const excelText = (v) => {
+    const s = String(v == null ? "" : v).trim();
+    if (!s) return "";
+    if (/^\d{4,}$/.test(s)) return `="${s}"`;
+    return s;
+  };
   const rowToCells = (r) => hasAgent
-    ? [r.eventName, r.buyerName, r.agent||"", r.supplier||"", r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""]
-    : [r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""];
+    ? [r.eventName, r.buyerName, r.agent||"", r.supplier||"", r.name||"", r.qty||1, excelText(r.phone), excelText(r.idNumber), excelText(r.tixAccount), loginLabel(r.loginVia), r.locked?"是":"", excelText(r.memberNo)]
+    : [r.eventName, r.buyerName, r.name||"", r.qty||1, excelText(r.phone), excelText(r.idNumber), excelText(r.tixAccount), loginLabel(r.loginVia), r.locked?"是":"", excelText(r.memberNo)];
   const sheetOutput = (() => {
     const lines = [headers.join("\t")];
     rows.forEach(r => { lines.push(rowToCells(r).join("\t")); });
