@@ -1606,31 +1606,84 @@ function IdentityExportModal({ events, title, onClose }) {
     return () => window.removeEventListener("keydown", handleEsc);
   }, [onClose]);
 
-  // 收集所有實名資料 [{eventName, buyerName, identity}]
+  // 收集所有實名資料 — 4 層 mode 會展開到 subItems(代購底下的真實客人)
+  // 每 row 結構:{ eventName, buyerName, agent, supplier, name, qty, phone, idNumber, tixAccount, loginVia, locked, memberNo }
+  // 規則:
+  //   - 識別人有 subItems → 展開,每個 subItem 是一 row,agent=識別人名,supplier=識別人.supplier
+  //   - 識別人沒 subItems → 用識別人本身當 row,agent=空,supplier=識別人.supplier
   const rows = [];
   (events || []).forEach(evt => {
     (evt.buyers || []).forEach(b => {
       (b.identities || []).forEach(it => {
-        rows.push({ eventName: evt.name, buyerName: b.name, ...it });
+        if (Array.isArray(it.subItems) && it.subItems.length > 0) {
+          // 展開到細項實名 (代購底下的客人)
+          it.subItems.forEach(si => {
+            rows.push({
+              eventName: evt.name,
+              buyerName: b.name,
+              agent: it.name || "",
+              supplier: it.supplier || "",
+              name: si.name || "",
+              qty: si.qty || 1,
+              phone: si.phone || "",
+              idNumber: si.idNumber || "",
+              tixAccount: si.tixAccount || "",
+              loginVia: si.loginVia || "",
+              locked: !!si.locked,
+              memberNo: si.memberNo || "",
+            });
+          });
+        } else {
+          // 沒 subItems → 用識別人本身當 row(舊資料 / 3 層 mode)
+          rows.push({
+            eventName: evt.name,
+            buyerName: b.name,
+            agent: "",
+            supplier: it.supplier || "",
+            name: it.name || "",
+            qty: it.qty || 1,
+            phone: it.phone || "",
+            idNumber: it.idNumber || "",
+            tixAccount: it.tixAccount || "",
+            loginVia: it.loginVia || "",
+            locked: !!it.locked,
+            memberNo: it.memberNo || "",
+          });
+        }
       });
     });
   });
   const totalIdentities = rows.length;
+  // 偵測:有沒有任何 row 帶 agent(代購層)?有 → 顯示 4 層欄位
+  const hasAgent = rows.some(r => r.agent);
 
   const loginLabel = (v) => v === "facebook" ? "FB" : v === "google" ? "Google" : "";
 
-  // 文字格式（給 LINE 看的，分場次分人）
+  // 文字格式 — 給 LINE 看,分場次 → 訂購人 → 代購(若有)分群
   const textOutput = (() => {
     const lines = [];
     (events || []).forEach(evt => {
-      const evtRows = (evt.buyers || []).flatMap(b =>
-        (b.identities || []).map(it => ({ buyerName: b.name, ...it }))
-      );
+      const evtRows = rows.filter(r => r.eventName === evt.name);
       if (evtRows.length === 0) return;
-      lines.push(`📌 ${evt.name}（${evtRows.length} 筆）`);
-      let lastBuyer = "";
+      lines.push(`📌 ${evt.name}(${evtRows.length} 筆)`);
+      let lastBuyer = "", lastAgentKey = "";
       evtRows.forEach(r => {
-        if (r.buyerName !== lastBuyer) { lines.push(`【${r.buyerName}】`); lastBuyer = r.buyerName; }
+        if (r.buyerName !== lastBuyer) {
+          lines.push(`【${r.buyerName}】`);
+          lastBuyer = r.buyerName;
+          lastAgentKey = "";
+        }
+        // 4 層:有 agent 時,同 agent + supplier 分一群
+        if (r.agent) {
+          const agentKey = `${r.agent}|${r.supplier}`;
+          if (agentKey !== lastAgentKey) {
+            const supTxt = r.supplier ? `(${r.supplier}供)` : "";
+            lines.push(`  ▸ 代購 ${r.agent}${supTxt}`);
+            lastAgentKey = agentKey;
+          }
+        } else {
+          lastAgentKey = "";
+        }
         const parts = [];
         parts.push(`姓名:${r.name||"(未填)"}`);
         parts.push(`拿 ${r.qty||1} 張`);
@@ -1641,20 +1694,25 @@ function IdentityExportModal({ events, title, onClose }) {
         if (login) parts.push(`登入:${login}`);
         if (r.locked) parts.push(`🔒帳號鎖`);
         if (r.memberNo) parts.push(`會員#:${r.memberNo}`);
-        lines.push("  " + parts.join(" / "));
+        // 縮排:有 agent 多縮一層
+        const indent = r.agent ? "      " : "  ";
+        lines.push(indent + parts.join(" / "));
       });
       lines.push("");
     });
     return lines.join("\n").trim();
   })();
 
-  // Excel/Sheet 格式（tab 分隔）
-  const headers = ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  // Excel/Sheet 格式(tab 分隔) — 4 層 mode 多兩欄:代購、上游
+  const headers = hasAgent
+    ? ["場次","訂購人","代購","上游","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"]
+    : ["場次","訂購人","姓名","拿幾張","電話","身分證","拓元帳號","登入方式","帳號被鎖","會員編號"];
+  const rowToCells = (r) => hasAgent
+    ? [r.eventName, r.buyerName, r.agent||"", r.supplier||"", r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""]
+    : [r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""];
   const sheetOutput = (() => {
     const lines = [headers.join("\t")];
-    rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].join("\t"));
-    });
+    rows.forEach(r => { lines.push(rowToCells(r).join("\t")); });
     return lines.join("\n");
   })();
 
@@ -1662,9 +1720,7 @@ function IdentityExportModal({ events, title, onClose }) {
   const csvOutput = (() => {
     const escape = v => `"${String(v||"").replace(/"/g,'""')}"`;
     const lines = [headers.map(escape).join(",")];
-    rows.forEach(r => {
-      lines.push([r.eventName, r.buyerName, r.name||"", r.qty||1, r.phone||"", r.idNumber||"", r.tixAccount||"", loginLabel(r.loginVia), r.locked?"是":"", r.memberNo||""].map(escape).join(","));
-    });
+    rows.forEach(r => { lines.push(rowToCells(r).map(escape).join(",")); });
     return lines.join("\n");
   })();
 
@@ -4153,7 +4209,14 @@ function MainApp() {
                             if (sup) supTotals[sup] = (supTotals[sup] || 0) + (bt.qty || 0);
                           });
                           const ents = Object.entries(supTotals);
-                          if (ents.length === 0) return null;
+                          if (ents.length === 0) {
+                            // 完全沒設上游 → 顯示「+ 設定上游」placeholder,點下去開編輯
+                            if (batches.length === 0) return null; // 沒分批就不顯示
+                            return (
+                              <span onClick={()=>setSupplierEditModal({eventId:evt.id,buyerIdx:i})} title="點此設定上游(佩盈姐 / 君儀姐 ...)"
+                                style={{ fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:10,background:"#fafafa",color:"#999",border:"1px dashed #ccc",cursor:"pointer" }}>+ 設定上游</span>
+                            );
+                          }
                           return (
                             <span onClick={()=>setSupplierEditModal({eventId:evt.id,buyerIdx:i})} title="點此編輯各批次的上游"
                               style={{ fontSize:11,color:"#666",padding:"2px 8px",borderRadius:10,background:"rgba(255,255,255,.7)",border:"1px solid #d8d2c0",cursor:"pointer" }}>
@@ -4245,6 +4308,46 @@ function MainApp() {
                           {(!b.identities || b.identities.length === 0) && (
                             <div style={{ fontSize:11,color:"#a09080",padding:"4px 2px" }}>還沒有代購 — 點「＋ 新增代購」加,或用「📥 批次匯入實名」</div>
                           )}
+                          {/* 同名彙總:某代購名在此 buyer 底下出現 2+ 次時,顯示「總張數 (上游A x · 上游B y)」 */}
+                          {(() => {
+                            const byName = new Map();
+                            (b.identities || []).forEach(it => {
+                              const nm = (it.name || "").trim();
+                              if (!nm) return;
+                              if (!byName.has(nm)) byName.set(nm, { total: 0, count: 0, suppliers: {} });
+                              const e = byName.get(nm);
+                              e.total += (it.qty || 0);
+                              e.count += 1;
+                              const sup = (it.supplier || "").trim();
+                              if (sup) e.suppliers[sup] = (e.suppliers[sup] || 0) + (it.qty || 0);
+                            });
+                            const dups = [...byName.entries()].filter(([_, e]) => e.count >= 2);
+                            if (dups.length === 0) return null;
+                            dups.sort((a, b) => b[1].total - a[1].total);
+                            return (
+                              <div style={{ marginBottom:6,padding:"5px 9px",background:"#fffbf0",borderRadius:6,border:"1px solid #e4d4a0",fontSize:11,color:"#7a6028",lineHeight:1.6 }}>
+                                <span style={{ fontWeight:700,marginRight:4 }}>🧮 同名彙總:</span>
+                                {dups.map(([nm, e], di) => {
+                                  const supEnts = Object.entries(e.suppliers).sort((a,b)=>b[1]-a[1]);
+                                  return (
+                                    <span key={nm}>
+                                      {di > 0 && <span style={{ opacity:.4,margin:"0 6px" }}>·</span>}
+                                      <b style={{ color:"#5a4a2a" }}>{nm}</b> <b style={{ color:"#b8531a" }}>{e.total}</b>
+                                      {supEnts.length > 0 && (
+                                        <span style={{ color:"#999" }}>
+                                          {" ("}
+                                          {supEnts.map(([s, q], si) => (
+                                            <span key={s}>{si > 0 && <span style={{ opacity:.5,margin:"0 3px" }}>·</span>}{s} <b style={{ color:"#7a6028" }}>{q}</b></span>
+                                          ))}
+                                          {")"}
+                                        </span>
+                                      )}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                           {(b.identities||[]).map((it,k) => {
                             const ekey = `${evt.id}_${i}_${it.id}`;
                             const isOpen = expandedIdentity === ekey;
