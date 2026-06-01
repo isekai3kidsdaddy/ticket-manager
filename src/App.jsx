@@ -146,6 +146,108 @@ function ConfirmModal({ msg, onYes, onNo, onDismiss, yesLabel, noLabel, maxWidth
   );
 }
 
+// ─── 通用 popover 選單(把多顆按鈕收進一個 ▾ 選單) ───
+function ActionMenu({ label, items, color = "neutral", style }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null); // { top, left, openUpward } in layout px
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+
+  // visibleItems 先算 — 避免 TDZ + 給 useEffect 用
+  const visibleItems = items.filter(Boolean);
+
+  useEffect(() => {
+    if (!open) { setPos(null); return; }
+    const btn = btnRef.current;
+    if (!btn) return;
+
+    // 偵測祖先的 CSS zoom (桌機 1.3,手機 1)
+    // getBoundingClientRect 回傳的是視覺座標(已乘 zoom),
+    // 但 fixed 元素的 top/left 又會再被 zoom 一次 → 必須除以 zoom 抵消
+    let zoom = 1;
+    try {
+      const bz = parseFloat(getComputedStyle(document.body).zoom) || 1;
+      const hz = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+      zoom = bz * hz;
+    } catch {}
+
+    const r = btn.getBoundingClientRect();
+    const lTop = r.top / zoom;
+    const lBottom = r.bottom / zoom;
+    const lLeft = r.left / zoom;
+    const lVh = window.innerHeight / zoom;
+    const lVw = window.innerWidth / zoom;
+    const estHeight = Math.min(visibleItems.length * 38 + 16, 320);
+    const spaceBelow = lVh - lBottom;
+    const openUpward = spaceBelow < estHeight + 16 && lTop > estHeight + 16;
+    setPos({
+      top: openUpward ? Math.max(8, lTop - estHeight - 4) : (lBottom + 4),
+      left: Math.max(8, Math.min(lLeft, lVw - 200)),
+      openUpward,
+    });
+
+    const onDocClick = (e) => {
+      if (menuRef.current?.contains(e.target)) return;
+      if (btnRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onEsc = (e) => { if (e.key === "Escape") setOpen(false); };
+    const onScrollOrResize = () => setOpen(false);
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onEsc);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+    // eslint-disable-next-line
+  }, [open]);
+
+  if (visibleItems.length === 0) return null;
+  const colorMap = {
+    neutral: { bd:"#d4d0c8", bg:"#fff", fg:"#5a5450" },
+    bulk:    { bd:"#c4b89a", bg:"#fffaeb", fg:"#8b6a2d" },
+    lifecycle:{bd:"#b8d4b8", bg:"#e8f0e8", fg:"#4a7a4a" },
+  };
+  const c = colorMap[color] || colorMap.neutral;
+  return (
+    <>
+      <button ref={btnRef} onClick={()=>setOpen(o=>!o)} style={{
+        padding:"6px 12px",borderRadius:8,border:`1px solid ${c.bd}`,background:c.bg,
+        fontSize:12,cursor:"pointer",fontWeight:700,color:c.fg,fontFamily:"inherit",
+        ...style,
+      }}>{label} <span style={{ fontSize:9,opacity:.7 }}>{open ? "▴" : "▾"}</span></button>
+      {open && pos && (
+        <div ref={menuRef} style={{
+          position:"fixed",top:pos.top,left:pos.left,zIndex:9999,
+          background:"#fff",border:"1px solid #d4d0c8",borderRadius:8,
+          boxShadow:"0 6px 20px rgba(0,0,0,.18)",minWidth:190,padding:4,
+        }}>
+          {visibleItems.map((item, i) => 
+            item.divider ? (
+              <div key={i} style={{ height:1,background:"#f0ece2",margin:"4px 6px" }} />
+            ) : (
+              <button key={i} onClick={()=>{ item.onClick(); setOpen(false); }} style={{
+                display:"block",width:"100%",textAlign:"left",padding:"9px 12px",
+                border:"none",background:"transparent",cursor:"pointer",
+                fontSize:12,fontWeight:600,fontFamily:"inherit",borderRadius:5,
+                color: item.danger ? "#b8531a" : "#2d2a26",whiteSpace:"nowrap",
+              }} 
+              onMouseEnter={e=>e.currentTarget.style.background = item.danger ? "#fff0e8" : "#f6f3ec"}
+              onMouseLeave={e=>e.currentTarget.style.background = "transparent"}>
+                <span style={{ marginRight:8 }}>{item.icon}</span>{item.label}
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function InputModal({ title, label, defaultValue, onSave, onCancel, placeholder }) {
   const [val, setVal] = useState(defaultValue || "");
   useEffect(() => {
@@ -276,6 +378,8 @@ function RealnameFormPage({ token }) {
   // 是否載入了既有資料(編輯模式 → 上次有填過)
   const [loadedFromExisting, setLoadedFromExisting] = useState(false);
   const [originalCount, setOriginalCount] = useState(0);
+  // 鎖定狀態 — 訂購人鎖定後,代購不能再修改
+  const [lockedInfo, setLockedInfo] = useState(null); // { lockedAt: ISO string|null } or null
 
   useEffect(() => { loadByToken(); /* eslint-disable-next-line */ }, [token]);
 
@@ -305,6 +409,9 @@ function RealnameFormPage({ token }) {
       if (foundIdentity) {
         // identity-level token:填細項實名 (subItems)
         setMode("identity");
+        if (foundIdentity.realnameLocked) {
+          setLockedInfo({ lockedAt: foundIdentity.realnameLockedAt || null, scope: "identity" });
+        }
         const totalQty = foundIdentity.qty || 1;
         setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, identityName: foundIdentity.name, totalQty, tixOnly });
         const existing = foundIdentity.subItems || [];
@@ -323,6 +430,9 @@ function RealnameFormPage({ token }) {
       } else {
         // buyer-level token (現有行為):填 identities
         setMode("buyer");
+        if (foundBuyer.realnameLocked) {
+          setLockedInfo({ lockedAt: foundBuyer.realnameLockedAt || null, scope: "buyer" });
+        }
         const totalQty = (foundBuyer.batches || []).reduce((s, b) => s + (b.qty || 0), 0) || foundBuyer.qty || 1;
         setEventInfo({ eventName: foundEvent.name, buyerName: foundBuyer.name, totalQty, tixOnly });
         const existing = foundBuyer.identities || [];
@@ -389,6 +499,14 @@ function RealnameFormPage({ token }) {
           if (eIdx >= 0) break;
         }
         if (eIdx < 0 || !identityId) { setError("連結已失效"); setSaving(false); return; }
+        // 二次檢查鎖定 — 防止訂購人剛剛鎖定但代購還按了送出
+        const itFresh = (freshEvents[eIdx].buyers[bIdx].identities || []).find(x => x.id === identityId);
+        if (itFresh?.realnameLocked) {
+          setLockedInfo({ lockedAt: itFresh.realnameLockedAt || null, scope: "identity" });
+          setError("此實名表單已被訂購人鎖定,無法再提交。如需修改請聯絡訂購人解鎖。");
+          setSaving(false);
+          return;
+        }
         newEvents = freshEvents.map((evt, i) => {
           if (i !== eIdx) return evt;
           return { ...evt, buyers: (evt.buyers||[]).map((b, j) => {
@@ -413,6 +531,14 @@ function RealnameFormPage({ token }) {
           if (j >= 0) { eIdx = i; bIdx = j; break; }
         }
         if (eIdx < 0) { setError("連結已失效"); setSaving(false); return; }
+        // 二次檢查鎖定
+        const bFresh = freshEvents[eIdx].buyers[bIdx];
+        if (bFresh?.realnameLocked) {
+          setLockedInfo({ lockedAt: bFresh.realnameLockedAt || null, scope: "buyer" });
+          setError("此實名表單已被訂購人鎖定,無法再提交。如需修改請聯絡訂購人解鎖。");
+          setSaving(false);
+          return;
+        }
         newEvents = freshEvents.map((evt, i) => {
           if (i !== eIdx) return evt;
           return { ...evt, buyers: (evt.buyers||[]).map((b, j) => j !== bIdx ? b : { ...b, identities: submitted, needRealName: true }) };
@@ -458,6 +584,48 @@ function RealnameFormPage({ token }) {
           <h2 style={{ margin:"0 0 8px",fontSize:18,color:"#8b3a3a" }}>連結無法使用</h2>
           <p style={{ color:"#666",fontSize:13,margin:0 }}>{error}</p>
           <p style={{ color:"#999",fontSize:11,margin:"16px 0 0" }}>請聯絡賣家確認</p>
+        </div>
+      </div>
+    );
+  }
+  if (lockedInfo) {
+    return (
+      <div style={{ minHeight:"100vh",background:"#faf7f0",padding:"20px 14px 60px",fontFamily:"-apple-system, BlinkMacSystemFont, 'PingFang TC', sans-serif" }}>
+        <div style={{ maxWidth:480,margin:"0 auto" }}>
+          <div style={{ background:"#fff",padding:"22px 20px",borderRadius:12,marginBottom:14,boxShadow:"0 2px 10px rgba(0,0,0,.04)",textAlign:"center" }}>
+            <div style={{ fontSize:46,marginBottom:8 }}>🔒</div>
+            <h1 style={{ margin:"0 0 10px",fontSize:18,fontWeight:700,color:"#8b3a3a" }}>此實名表單已被鎖定</h1>
+            <div style={{ fontSize:12,color:"#666",lineHeight:1.7,marginTop:10 }}>
+              訂購人已將此表單鎖定 — 通常代表<br/>
+              <b style={{color:"#8b3a3a"}}>名單已交付主辦單位</b>,無法再修改。<br/><br/>
+              如需修改實名資料,請<b>聯絡訂購人</b>請他/她解鎖。
+            </div>
+            {lockedInfo.lockedAt && (
+              <div style={{ marginTop:14,padding:"6px 12px",background:"#fff5f5",borderRadius:6,display:"inline-block",fontSize:11,color:"#8b3a3a" }}>
+                🔒 鎖定時間: {new Date(lockedInfo.lockedAt).toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}
+              </div>
+            )}
+          </div>
+          {eventInfo && (
+            <div style={{ background:"#fff",padding:"14px 16px",borderRadius:10,boxShadow:"0 1px 6px rgba(0,0,0,.04)" }}>
+              <div style={{ fontSize:11,color:"#888",marginBottom:6 }}>場次資訊</div>
+              <div style={{ fontSize:14,fontWeight:700,color:"#2d2a26",marginBottom:4 }}>{eventInfo.eventName}</div>
+              <div style={{ fontSize:12,color:"#666" }}>{eventInfo.buyerName}{mode === "identity" && eventInfo.identityName ? ` → ${eventInfo.identityName}` : ""} · 共 {eventInfo.totalQty} 張</div>
+              {identities.length > 0 && (
+                <>
+                  <div style={{ marginTop:12,paddingTop:10,borderTop:"1px dashed #e0d8c0",fontSize:11,color:"#888",marginBottom:6 }}>已填實名資料(僅供查看):</div>
+                  {identities.map((it, idx) => (
+                    <div key={it.id||idx} style={{ marginTop:6,padding:"8px 10px",background:"#faf7f0",borderRadius:6,fontSize:11,color:"#555",lineHeight:1.6 }}>
+                      <b style={{color:"#2d2a26"}}>{idx+1}. {it.name || "(未填名)"}</b>
+                      {it.qty > 1 && <span style={{color:"#999"}}> · {it.qty} 張</span>}
+                      {it.phone && <span style={{color:"#888"}}> · {it.phone}</span>}
+                      {it.idNumber && <span style={{color:"#888"}}> · {it.idNumber}</span>}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -574,8 +742,10 @@ function FormField({ label, value, onChange, placeholder, mono = false, type = "
 }
 
 // ─── 主 app 內顯示「實名連結」的 modal ───
-function RealnameLinkModal({ event, buyer, onClose, onRegenerate }) {
+function RealnameLinkModal({ event, buyer, onClose, onRegenerate, onToggleLock }) {
   const [copied, setCopied] = useState(null);
+  const isLocked = !!buyer.realnameLocked;
+  const lockedAt = buyer.realnameLockedAt;
   const url = typeof window !== "undefined"
     ? `${window.location.origin}${window.location.pathname}?fill=${buyer.realnameToken}`
     : `?fill=${buyer.realnameToken}`;
@@ -602,8 +772,15 @@ ${url}
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:14,padding:"20px 22px",width:"100%",maxWidth:520,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
-        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>🔗 實名連結 — {buyer.name}</h3>
+        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>{isLocked ? "🔒" : "🔗"} 實名連結 — {buyer.name}</h3>
         <div style={{ fontSize:12,color:"#888",marginBottom:14 }}>{event.name} · 共 {totalQty} 張</div>
+
+        {isLocked && (
+          <div style={{ background:"#fff5f5",border:"1px solid #e0a0a0",borderRadius:8,padding:"9px 12px",fontSize:12,color:"#8b3a3a",marginBottom:12,lineHeight:1.6 }}>
+            <b>🔒 已鎖定</b> — 代購開連結會看到「已鎖定」訊息,無法再修改。<br/>
+            {lockedAt && <span style={{ fontSize:10,opacity:.8 }}>鎖定時間: {new Date(lockedAt).toLocaleString("zh-TW")}</span>}
+          </div>
+        )}
 
         <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>專屬連結（請只傳給此訂購人）</div>
         <div style={{ display:"flex",gap:6,marginBottom:12 }}>
@@ -622,8 +799,14 @@ ${url}
           ✓ 連結可重複進入修改,訂購人填完資料會自動同步到 app
         </div>
 
-        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
-          <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap" }}>
+          <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+            <button onClick={onToggleLock} title={isLocked ? "解鎖後代購可重新進入修改" : "鎖定後代購無法再修改(名單交付後使用)"}
+              style={{ padding:"7px 12px",borderRadius:7,border: isLocked ? "1px solid #5a7a5a" : "1px solid #c89030",background: isLocked ? "#e8f0e8" : "#fffaeb",fontSize:11,cursor:"pointer",fontWeight:700,color: isLocked ? "#3a6a3a" : "#8b6a2d",fontFamily:"inherit" }}>
+              {isLocked ? "🔓 解鎖" : "🔒 鎖定連結"}
+            </button>
+            <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+          </div>
           <button onClick={onClose} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>完成</button>
         </div>
       </div>
@@ -632,8 +815,10 @@ ${url}
 }
 
 // ─── 識別人(代購層) 細項實名連結 Modal ───
-function IdentityRealnameLinkModal({ event, buyer, identity, onClose, onRegenerate }) {
+function IdentityRealnameLinkModal({ event, buyer, identity, onClose, onRegenerate, onToggleLock }) {
   const [copied, setCopied] = useState(null);
+  const isLocked = !!identity.realnameLocked;
+  const lockedAt = identity.realnameLockedAt;
   const url = typeof window !== "undefined"
     ? `${window.location.origin}${window.location.pathname}?fill=${identity.realnameToken}`
     : `?fill=${identity.realnameToken}`;
@@ -658,8 +843,15 @@ ${url}
   return (
     <div style={{ position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"#fff",borderRadius:14,padding:"20px 22px",width:"100%",maxWidth:520,boxShadow:"0 16px 48px rgba(0,0,0,.2)" }}>
-        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>🔗 細項實名連結 — {identity.name||"(未命名)"}</h3>
+        <h3 style={{ margin:"0 0 4px",fontSize:16,fontWeight:700 }}>{isLocked ? "🔒" : "🔗"} 細項實名連結 — {identity.name||"(未命名)"}</h3>
         <div style={{ fontSize:12,color:"#888",marginBottom:14 }}>{event.name} · 透過 {buyer.name} · 共 {identityQty} 張</div>
+
+        {isLocked && (
+          <div style={{ background:"#fff5f5",border:"1px solid #e0a0a0",borderRadius:8,padding:"9px 12px",fontSize:12,color:"#8b3a3a",marginBottom:12,lineHeight:1.6 }}>
+            <b>🔒 已鎖定</b> — 代購開連結會看到「已鎖定」訊息,無法再修改。<br/>
+            {lockedAt && <span style={{ fontSize:10,opacity:.8 }}>鎖定時間: {new Date(lockedAt).toLocaleString("zh-TW")}</span>}
+          </div>
+        )}
 
         <div style={{ fontSize:11,color:"#888",marginBottom:4 }}>專屬連結 — 只傳給代購本人 ({identity.name||"未命名"})</div>
         <div style={{ display:"flex",gap:6,marginBottom:12 }}>
@@ -679,8 +871,14 @@ ${url}
           🔒 此連結只能編輯 {identity.name||"此代購"} 自己的細項,看不到其他代購的資料
         </div>
 
-        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8 }}>
-          <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap" }}>
+          <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
+            <button onClick={onToggleLock} title={isLocked ? "解鎖後代購可重新進入修改" : "鎖定後代購無法再修改(名單交付後使用)"}
+              style={{ padding:"7px 12px",borderRadius:7,border: isLocked ? "1px solid #5a7a5a" : "1px solid #c89030",background: isLocked ? "#e8f0e8" : "#fffaeb",fontSize:11,cursor:"pointer",fontWeight:700,color: isLocked ? "#3a6a3a" : "#8b6a2d",fontFamily:"inherit" }}>
+              {isLocked ? "🔓 解鎖" : "🔒 鎖定連結"}
+            </button>
+            <button onClick={onRegenerate} title="作廢舊連結,產一個新的(舊連結會立刻失效)" style={{ padding:"7px 12px",borderRadius:7,border:"1px solid #e0a890",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>🔄 重新產生</button>
+          </div>
           <button onClick={onClose} style={{ padding:"8px 22px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,cursor:"pointer",fontWeight:700,fontFamily:"inherit" }}>完成</button>
         </div>
       </div>
@@ -1874,6 +2072,32 @@ function MainApp() {
       }
     });
   };
+  // 鎖定/解鎖實名連結 — 鎖定後代購開連結會看到「已鎖定」畫面,無法再修改或提交
+  const toggleRealnameLock = (eventId, buyerIdx) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    if (!evt || !b || !b.realnameToken) return;
+    const isLocked = !!b.realnameLocked;
+    const action = isLocked ? "解鎖" : "鎖定";
+    setConfirmModal({
+      msg: isLocked
+        ? `要解鎖「${b.name}」的實名連結嗎?\n\n解鎖後,代購可重新進入修改實名資料。`
+        : `要鎖定「${b.name}」的實名連結嗎?\n\n🔒 鎖定後:\n· 代購開連結會看到「已鎖定」訊息\n· 代購無法再修改或提交\n· 適合名單已交付主辦單位之後鎖\n\n💡 之後隨時可再解鎖。`,
+      onYes: () => {
+        updateEvent(eventId, e => {
+          if (isLocked) {
+            const { realnameLocked, realnameLockedAt, ...rest } = e.buyers[buyerIdx];
+            e.buyers[buyerIdx] = rest;
+          } else {
+            e.buyers[buyerIdx] = { ...e.buyers[buyerIdx], realnameLocked: true, realnameLockedAt: new Date().toISOString() };
+          }
+          return e;
+        });
+        addLog(`【${evt.name}】${isLocked ? "🔓" : "🔒"} ${action}「${b.name}」的實名連結`, snap());
+        setConfirmModal(null);
+      }
+    });
+  };
 
   // ─── 識別人 (代購層) 的細項實名連結 ───
   const [identityLinkModal, setIdentityLinkModal] = useState(null); // { eventId, buyerIdx, identityId }
@@ -1912,6 +2136,38 @@ function MainApp() {
           return e;
         });
         addLog(`【${evt.name}】${b.name} → 重新產生「${it.name||""}」的細項實名連結(舊連結作廢)`, snap());
+        setConfirmModal(null);
+      }
+    });
+  };
+  // 鎖定/解鎖識別人(代購)的細項實名連結
+  const toggleIdentityRealnameLock = (eventId, buyerIdx, identityId) => {
+    const evt = events.find(e => e.id === eventId);
+    const b = evt?.buyers?.[buyerIdx];
+    const it = b?.identities?.find(x => x.id === identityId);
+    if (!evt || !b || !it || !it.realnameToken) return;
+    const isLocked = !!it.realnameLocked;
+    const action = isLocked ? "解鎖" : "鎖定";
+    setConfirmModal({
+      msg: isLocked
+        ? `要解鎖「${it.name||"(未命名)"}」的細項實名連結嗎?\n\n解鎖後,代購可重新進入修改。`
+        : `要鎖定「${it.name||"(未命名)"}」的細項實名連結嗎?\n\n🔒 鎖定後:\n· 代購開連結會看到「已鎖定」訊息\n· 代購無法再修改或提交\n· 適合該代購名單已交付之後鎖\n\n💡 之後隨時可再解鎖。`,
+      onYes: () => {
+        updateEvent(eventId, e => {
+          e.buyers[buyerIdx] = {
+            ...e.buyers[buyerIdx],
+            identities: e.buyers[buyerIdx].identities.map(x => {
+              if (x.id !== identityId) return x;
+              if (isLocked) {
+                const { realnameLocked, realnameLockedAt, ...rest } = x;
+                return rest;
+              }
+              return { ...x, realnameLocked: true, realnameLockedAt: new Date().toISOString() };
+            }),
+          };
+          return e;
+        });
+        addLog(`【${evt.name}】${b.name} → ${isLocked ? "🔓" : "🔒"} ${action}「${it.name||""}」的細項實名連結`, snap());
         setConfirmModal(null);
       }
     });
@@ -4240,7 +4496,18 @@ function MainApp() {
                         {b.note&&<span style={{ fontSize:11,color:"#999",marginLeft:4 }}>({b.note})</span>}
                         <div style={{ marginLeft:"auto",display:"flex",gap:4 }}>
                           <button onClick={()=>{setAddingBatch({eventId:evt.id,idx:i});setEditingBatch(null);}} title="新增分批（例如一部分已取票、一部分待退費）" style={{ padding:"3px 10px",borderRadius:7,border:"1px solid #c4b89a",background:"#fff9ec",cursor:"pointer",fontSize:11,fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>＋ 分批</button>
-                          <button onClick={()=>openRealnameLink(evt.id,i)} title="產生這位訂購人的實名填寫連結(LINE 傳給他/她)" style={{ width:26,height:26,borderRadius:6,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",color:"#4a7a4a" }}>🔗</button>
+                          <button onClick={()=>openRealnameLink(evt.id,i)}
+                            title={
+                              !b.realnameToken ? "產生這位訂購人的實名填寫連結(LINE 傳給他/她)"
+                              : b.realnameLocked ? `🔒 已鎖定 ${b.realnameLockedAt ? `(${new Date(b.realnameLockedAt).toLocaleString("zh-TW",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})})` : ""} — 點開可解鎖`
+                              : "已產生實名連結 — 點開可複製/鎖定/重新產生"
+                            }
+                            style={{
+                              width:26,height:26,borderRadius:6,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",
+                              border: b.realnameLocked ? "1px solid #e0a0a0" : (b.realnameToken ? "1px solid #b8d4b8" : "1px solid #d4d0c8"),
+                              background: b.realnameLocked ? "#fff0f0" : (b.realnameToken ? "#e8f0e8" : "#fafaf6"),
+                              color: b.realnameLocked ? "#a04040" : (b.realnameToken ? "#4a7a4a" : "#999"),
+                            }}>{b.realnameLocked ? "🔒" : "🔗"}</button>
                           <button onClick={()=>setInputModal({title:`編輯備註 — ${b.name}`,label:"備註",defaultValue:b.note||"",placeholder:"例：2人全勤",onSave:v=>{updateBuyer(evt.id,i,{note:v||undefined});setInputModal(null);}})}
                             style={{ width:26,height:26,borderRadius:6,border:"1px solid #e4e0d8",background:"#fff",cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",color:"#999" }} title="編輯備註">✎</button>
                           <button onClick={()=>removeBuyer(evt.id,i)} style={{ width:26,height:26,borderRadius:6,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",color:"#c47070" }} title="移除">×</button>
@@ -4395,7 +4662,18 @@ function MainApp() {
                                         : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
                                   {is4LayerMode && (
-                                    <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)} title={`產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`} style={{ marginLeft:"auto",width:22,height:22,borderRadius:5,border:"1px solid #b8d4b8",background:"#e8f0e8",cursor:"pointer",fontSize:11,color:"#4a7a4a",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center" }}>🔗</button>
+                                    <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)}
+                                      title={
+                                        !it.realnameToken ? `產生「${it.name||"此人"}」的細項實名連結 → LINE 給代購自填`
+                                        : it.realnameLocked ? `🔒 已鎖定 ${it.realnameLockedAt ? `(${new Date(it.realnameLockedAt).toLocaleString("zh-TW",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})})` : ""} — 點開可解鎖`
+                                        : `已產生細項實名連結 — 點開可複製/鎖定/重新產生`
+                                      }
+                                      style={{
+                                        marginLeft:"auto",width:22,height:22,borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",
+                                        border: it.realnameLocked ? "1px solid #e0a0a0" : (it.realnameToken ? "1px solid #b8d4b8" : "1px solid #d4d0c8"),
+                                        background: it.realnameLocked ? "#fff0f0" : (it.realnameToken ? "#e8f0e8" : "#fafaf6"),
+                                        color: it.realnameLocked ? "#a04040" : (it.realnameToken ? "#4a7a4a" : "#999"),
+                                      }}>{it.realnameLocked ? "🔒" : "🔗"}</button>
                                   )}
                                   <button onClick={()=>removeIdentity(evt.id,i,it.id)} style={{ marginLeft: is4LayerMode ? 0 : "auto",width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="刪除">×</button>
                                 </div>
@@ -4587,54 +4865,72 @@ function MainApp() {
                 <AddBuyerRow eventId={evt.id} buyerNames={buyerNames} onAdd={addBuyerToEvent}/>
                 {evt.note&&<div style={{ marginTop:8,fontSize:12,color:"#8b7355",background:"#faf7f0",padding:"6px 10px",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center" }}><span>備註：{evt.note}</span><button onClick={()=>setInputModal({title:"編輯場次備註",label:"備註",defaultValue:evt.note||"",onSave:v=>{updateEvent(evt.id,e=>{e.note=v||undefined;return e;});setInputModal(null);}})} style={{ background:"none",border:"none",fontSize:11,color:"#8b7355",cursor:"pointer",fontWeight:600,fontFamily:"inherit" }}>編輯</button></div>}
                 <div style={{ display:"flex",gap:8,marginTop:10,flexWrap:"wrap" }}>
-                  {/* 售票系統 toggle:預設拓元,點一下切換到「其他系統」 */}
-                  <button onClick={()=>{
-                    const wasTixOn = evt.tixOnly !== false;
-                    const newVal = !wasTixOn;
-                    addLog(`【${evt.name}】售票系統→${newVal?"拓元":"其他"}`,snap());
-                    updateEvent(evt.id,e=>{ e.tixOnly = newVal; return e; });
-                  }} style={(evt.tixOnly !== false) ? {
-                    padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#faf7f0",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit"
-                  } : {
-                    padding:"6px 14px",borderRadius:8,border:"1px solid #c4d0d8",background:"#eef2f5",fontSize:12,cursor:"pointer",fontWeight:700,color:"#5a7080",fontFamily:"inherit"
-                  }} title="點一下切換售票系統 (影響實名欄位顯示)">
-                    {(evt.tixOnly !== false) ? "🎫 拓元場" : "🌐 非拓元場"}
-                  </button>
-                  {evt.status==="active"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 全部已取票</button>}
-                  {(evt.buyers||[]).some(b=>(b.identities||[]).length>0)&&<button onClick={()=>setIdentityExportModal({events:[evt],title:evt.name})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出本場實名</button>}
-                  <button onClick={()=>setImportIdentityModal({eventId:evt.id})} title="從試算表批次貼上,自動填入訂購人的實名資料" style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4b8",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#4a7a4a",fontFamily:"inherit" }}>📥 批次匯入實名</button>
-                  {(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"))&&<button onClick={()=>{
-                    addLog(`【${evt.name}】全部待退費標記為已退款`,snap());
-                    updateEvent(evt.id,e=>{
-                      e.buyers=e.buyers.map(b=>{
-                        const nb=migrateBuyer(b);
-                        nb.batches=nb.batches.map(bt=>bt.st==="refund"?{...bt,st:"refunded"}:bt);
-                        return nb;
-                      });
-                      return e;
-                    });
-                  }} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4d9c4",background:"#dfeadf",fontSize:12,cursor:"pointer",fontWeight:700,color:"#4a6b4a",fontFamily:"inherit" }}>✅ 退款全部完成</button>}
-                  <button onClick={()=>{
-                    setConfirmModal({ msg:`確定要把【${evt.name}】裡所有「正常」的訂購人改成「待退費」嗎？\n（金額會留空讓你再填）`, onYes:()=>{
-                      addLog(`【${evt.name}】批次標記為待退費`,snap());
+                  {/* 售票系統 segmented control — 兩個選項都顯示,選中的高亮 */}
+                  <div style={{ display:"inline-flex",alignItems:"center",gap:6 }} title="售票系統切換 — 點另一邊即切換 (影響實名欄位顯示)">
+                    <span style={{ fontSize:11,color:"#888",fontWeight:600 }}>售票系統</span>
+                    <div style={{ display:"inline-flex",borderRadius:8,border:"1px solid #d4d0c8",overflow:"hidden",background:"#fff",lineHeight:1 }}>
+                      <button onClick={()=>{
+                        if (evt.tixOnly === false) {
+                          addLog(`【${evt.name}】售票系統→拓元`,snap());
+                          updateEvent(evt.id,e=>{ e.tixOnly = true; return e; });
+                        }
+                      }} style={{
+                        padding:"6px 12px",border:"none",fontSize:12,cursor:"pointer",fontWeight:700,fontFamily:"inherit",
+                        background: (evt.tixOnly !== false) ? "#f6e4b8" : "transparent",
+                        color: (evt.tixOnly !== false) ? "#7a5018" : "#a8a098",
+                      }}>🎫 拓元</button>
+                      <button onClick={()=>{
+                        if (evt.tixOnly !== false) {
+                          addLog(`【${evt.name}】售票系統→其他`,snap());
+                          updateEvent(evt.id,e=>{ e.tixOnly = false; return e; });
+                        }
+                      }} style={{
+                        padding:"6px 12px",border:"none",borderLeft:"1px solid #e0dccc",fontSize:12,cursor:"pointer",fontWeight:700,fontFamily:"inherit",
+                        background: (evt.tixOnly === false) ? "#c8dcec" : "transparent",
+                        color: (evt.tixOnly === false) ? "#3a5878" : "#a8a098",
+                      }}>🌐 其他</button>
+                    </div>
+                  </div>
+                  {(evt.buyers||[]).some(b=>(b.identities||[]).length>0)&&<button onClick={()=>setIdentityExportModal({events:[evt],title:evt.name})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fff9ec",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>📋 輸出實名</button>}
+                  <button onClick={()=>setImportIdentityModal({eventId:evt.id})} title="從試算表批次貼上,自動填入訂購人的實名資料" style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4b8",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#4a7a4a",fontFamily:"inherit" }}>📥 匯入實名</button>
+                  <ActionMenu label="⚡ 批次操作" color="bulk" items={[
+                    evt.status==="active" && { icon:"🎫", label:"全部已取票", onClick:()=>setEventStatus(evt.id,"picked") },
+                    { icon:"↩", label:"全部標為待退費", onClick:()=>{
+                      setConfirmModal({ msg:`確定要把【${evt.name}】裡所有「正常」的訂購人改成「待退費」嗎?\n(金額會留空讓你再填)`, onYes:()=>{
+                        addLog(`【${evt.name}】批次標記為待退費`,snap());
+                        updateEvent(evt.id,e=>{
+                          e.buyers=e.buyers.map(b=>{
+                            const nb=migrateBuyer(b);
+                            nb.batches=nb.batches.map(bt=>bt.st==="normal"?{...bt,st:"refund"}:bt);
+                            return nb;
+                          });
+                          return e;
+                        });
+                        setConfirmModal(null);
+                      }});
+                    }},
+                    (evt.buyers||[]).some(b=>buyerHasStatus(b,"refund")) && { icon:"✅", label:"退款全部完成", onClick:()=>{
+                      addLog(`【${evt.name}】全部待退費標記為已退款`,snap());
                       updateEvent(evt.id,e=>{
                         e.buyers=e.buyers.map(b=>{
                           const nb=migrateBuyer(b);
-                          nb.batches=nb.batches.map(bt=>bt.st==="normal"?{...bt,st:"refund"}:bt);
+                          nb.batches=nb.batches.map(bt=>bt.st==="refund"?{...bt,st:"refunded"}:bt);
                           return nb;
                         });
                         return e;
                       });
-                      setConfirmModal(null);
-                    }});
-                  }} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #d8c4a8",background:"#faf3e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>↩ 全部標為待退費</button>
-                  {evt.status==="active"&&<button onClick={()=>setEventStatus(evt.id,"done")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4d9c4",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:600,color:"#5a7a5a",fontFamily:"inherit" }}>✓ 直接完成</button>}
-                  {evt.status==="picked"&&<button onClick={()=>setEventStatus(evt.id,"done")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4d9c4",background:"#e8f0e8",fontSize:12,cursor:"pointer",fontWeight:600,color:"#5a7a5a",fontFamily:"inherit" }}>✓ 退費完成，結案</button>}
-                  {evt.status==="done"&&<button onClick={()=>setEventStatus(evt.id,"picked")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #b8d4e8",background:"#e0eef6",fontSize:12,cursor:"pointer",fontWeight:600,color:"#2d6a8b",fontFamily:"inherit" }}>🎫 移到已取票</button>}
-                  {(evt.status==="picked"||evt.status==="done")&&<button onClick={()=>setEventStatus(evt.id,"active")} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>↩ 移回進行中</button>}
-                  <button onClick={()=>setMergeEventModal({fromEventId:evt.id})} title="把此場次併入另一個場次(同名訂購人會自動合 batches+identities)" style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #c4b89a",background:"#fffaeb",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b6a2d",fontFamily:"inherit" }}>🔗 合併</button>
-                  <button onClick={()=>deleteEvent(evt.id)} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #e8c4c4",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#8b3a3a",fontFamily:"inherit" }}>刪除</button>
-                  {!evt.note&&<button onClick={()=>setInputModal({title:"新增場次備註",label:"備註",defaultValue:"",onSave:v=>{if(v)updateEvent(evt.id,e=>{e.note=v;return e;});setInputModal(null);}})} style={{ padding:"6px 14px",borderRadius:8,border:"1px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>＋ 備註</button>}
+                    }},
+                  ]}/>
+                  <ActionMenu label="🏁 場次管理" color="lifecycle" items={[
+                    evt.status==="active" && { icon:"✓", label:"直接完成 (移到已完成)", onClick:()=>setEventStatus(evt.id,"done") },
+                    evt.status==="picked" && { icon:"✓", label:"退費完成,結案", onClick:()=>setEventStatus(evt.id,"done") },
+                    evt.status==="done" && { icon:"🎫", label:"移到已取票", onClick:()=>setEventStatus(evt.id,"picked") },
+                    (evt.status==="picked"||evt.status==="done") && { icon:"↩", label:"移回進行中", onClick:()=>setEventStatus(evt.id,"active") },
+                    { icon:"🔗", label:"合併到其他場次", onClick:()=>setMergeEventModal({fromEventId:evt.id}) },
+                    !evt.note && { icon:"＋", label:"新增場次備註", onClick:()=>setInputModal({title:"新增場次備註",label:"備註",defaultValue:"",onSave:v=>{if(v)updateEvent(evt.id,e=>{e.note=v;return e;});setInputModal(null);}}) },
+                    { divider:true },
+                    { icon:"🗑", label:"刪除整場", onClick:()=>deleteEvent(evt.id), danger:true },
+                  ]}/>
                 </div>
               </div>)}
             </div>);
@@ -5112,8 +5408,8 @@ function MainApp() {
       {identityExportModal&&<IdentityExportModal events={identityExportModal.events} title={identityExportModal.title} onClose={()=>setIdentityExportModal(null)}/>}
       {buyerExportModal&&<BuyerExportModal buyers={buyerExportModal.buyers} title={buyerExportModal.title} onClose={()=>setBuyerExportModal(null)}/>}
       {importIdentityModal&&(()=>{const e=events.find(x=>x.id===importIdentityModal.eventId);return e?<BatchImportIdentityModal event={e} onClose={()=>setImportIdentityModal(null)} onConfirm={(additions)=>{bulkImportIdentities(e.id,additions);setImportIdentityModal(null);}}/>:null;})()}
-      {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
-      {identityLinkModal&&(()=>{const e=events.find(x=>x.id===identityLinkModal.eventId);const b=e?.buyers?.[identityLinkModal.buyerIdx];const it=b?.identities?.find(x=>x.id===identityLinkModal.identityId);return e&&b&&it?<IdentityRealnameLinkModal event={e} buyer={b} identity={it} onClose={()=>setIdentityLinkModal(null)} onRegenerate={()=>regenerateIdentityRealnameLink(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)}/>:null;})()}
+      {realnameLinkModal&&(()=>{const e=events.find(x=>x.id===realnameLinkModal.eventId);const b=e?.buyers?.[realnameLinkModal.buyerIdx];return e&&b?<RealnameLinkModal event={e} buyer={b} onClose={()=>setRealnameLinkModal(null)} onRegenerate={()=>regenerateRealnameLink(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)} onToggleLock={()=>toggleRealnameLock(realnameLinkModal.eventId,realnameLinkModal.buyerIdx)}/>:null;})()}
+      {identityLinkModal&&(()=>{const e=events.find(x=>x.id===identityLinkModal.eventId);const b=e?.buyers?.[identityLinkModal.buyerIdx];const it=b?.identities?.find(x=>x.id===identityLinkModal.identityId);return e&&b&&it?<IdentityRealnameLinkModal event={e} buyer={b} identity={it} onClose={()=>setIdentityLinkModal(null)} onRegenerate={()=>regenerateIdentityRealnameLink(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)} onToggleLock={()=>toggleIdentityRealnameLock(identityLinkModal.eventId,identityLinkModal.buyerIdx,identityLinkModal.identityId)}/>:null;})()}
       {supplierEditModal && (()=>{
         const e = events.find(x => x.id === supplierEditModal.eventId);
         const b = e?.buyers?.[supplierEditModal.buyerIdx];
