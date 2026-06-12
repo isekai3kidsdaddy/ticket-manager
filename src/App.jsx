@@ -2039,6 +2039,40 @@ function MainApp() {
   const [importIdentityModal, setImportIdentityModal] = useState(null); // { eventId } 批次匯入實名
   const [realnameLinkModal, setRealnameLinkModal] = useState(null); // { eventId, buyerIdx } 訂購人實名連結
 
+  // 訂購人卡片收合狀態 (UI-only,存 localStorage,不上 Supabase)
+  const [collapsedBuyers, setCollapsedBuyers] = useState(() => {
+    try {
+      const saved = localStorage.getItem("collapsedBuyers");
+      return new Set(saved ? JSON.parse(saved) : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("collapsedBuyers", JSON.stringify([...collapsedBuyers])); } catch {}
+  }, [collapsedBuyers]);
+  const toggleBuyerCollapse = (key) => {
+    setCollapsedBuyers(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+  const collapseAllBuyers = (eventId) => {
+    const evt = events.find(e => e.id === eventId);
+    if (!evt) return;
+    setCollapsedBuyers(prev => {
+      const next = new Set(prev);
+      (evt.buyers || []).forEach(b => next.add(`${eventId}:${b.name}`));
+      return next;
+    });
+  };
+  const expandAllBuyers = (eventId) => {
+    setCollapsedBuyers(prev => {
+      const next = new Set(prev);
+      [...next].forEach(k => { if (k.startsWith(`${eventId}:`)) next.delete(k); });
+      return next;
+    });
+  };
+
   const openRealnameLink = (eventId, buyerIdx) => {
     const evt = events.find(e => e.id === eventId);
     const b = evt?.buyers?.[buyerIdx];
@@ -4447,6 +4481,19 @@ function MainApp() {
 
               {/* Expanded */}
               {isExp&&(<div style={{ padding:"0 18px 16px",borderTop:"1px solid #f0ede8" }}>
+                {(evt.buyers||[]).length >= 3 && (() => {
+                  const allCollapsed = (evt.buyers||[]).every(b => collapsedBuyers.has(`${evt.id}:${b.name}`));
+                  return (
+                    <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6 }}>
+                      <span style={{ fontSize:10,color:"#a09080" }}>{(evt.buyers||[]).length} 位訂購人</span>
+                      <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
+                        title={allCollapsed ? "展開所有訂購人卡片" : "收合所有訂購人卡片(只看標頭,方便快速找人)"}
+                        style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>
+                        {allCollapsed ? "▸ 全部展開" : "▾ 全部收合"}
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div style={{ marginTop:12,display:"flex",flexDirection:"column",gap:8 }}>
                   {(evt.buyers||[]).map((b,i)=>{
                     const batches = getBatches(b);
@@ -4454,8 +4501,17 @@ function MainApp() {
                     const primarySt = buyerPrimaryStatus(b);
                     const scMain = BUYER_STATUS[primarySt] || BUYER_STATUS.normal;
                     const isAddingBatch = addingBatch && addingBatch.eventId===evt.id && addingBatch.idx===i;
+                    const collapseKey = `${evt.id}:${b.name}`;
+                    const isCollapsed = collapsedBuyers.has(collapseKey);
                     return (<div key={i} style={{ padding:"10px 12px",borderRadius:10,background:scMain.bg,border:`1px solid ${scMain.color}22` }}>
                       <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
+                        <button onClick={()=>toggleBuyerCollapse(collapseKey)}
+                          title={isCollapsed ? "展開查看所有細節" : "收合,只看標頭"}
+                          style={{ width:22,height:22,borderRadius:5,border:"1px solid transparent",background:"transparent",cursor:"pointer",fontSize:12,color:scMain.color,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:.7 }}
+                          onMouseEnter={e=>{e.currentTarget.style.background="rgba(255,255,255,.6)";e.currentTarget.style.opacity="1";}}
+                          onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.opacity=".7";}}>
+                          {isCollapsed ? "▸" : "▾"}
+                        </button>
                         <input
                           value={b.name||""}
                           onChange={e=>updateBuyer(evt.id,i,{name:e.target.value})}
@@ -4514,6 +4570,7 @@ function MainApp() {
                         </div>
                       </div>
 
+                      {!isCollapsed && (<>
                       {/* 取票前資料：實名 / SID */}
                       <div style={{ marginTop:6,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center" }}>
                         {[
@@ -4859,6 +4916,7 @@ function MainApp() {
                           onSave={(v)=>{addBatch(evt.id,i,v);setAddingBatch(null);}}
                           onCancel={()=>setAddingBatch(null)}/>)}
                       </div>
+                      </>)}
                     </div>);
                   })}
                 </div>
