@@ -2039,36 +2039,39 @@ function MainApp() {
   const [importIdentityModal, setImportIdentityModal] = useState(null); // { eventId } 批次匯入實名
   const [realnameLinkModal, setRealnameLinkModal] = useState(null); // { eventId, buyerIdx } 訂購人實名連結
 
-  // 訂購人卡片收合狀態 (UI-only,存 localStorage,不上 Supabase)
-  const [collapsedBuyers, setCollapsedBuyers] = useState(() => {
+  // 訂購人卡片展開狀態 (UI-only,存 localStorage,不上 Supabase)
+  // 預設「全部收合」— 只有被加入 expandedBuyers 的才展開
+  const [expandedBuyers, setExpandedBuyers] = useState(() => {
     try {
-      const saved = localStorage.getItem("collapsedBuyers");
+      const saved = localStorage.getItem("expandedBuyers");
       return new Set(saved ? JSON.parse(saved) : []);
     } catch { return new Set(); }
   });
   useEffect(() => {
-    try { localStorage.setItem("collapsedBuyers", JSON.stringify([...collapsedBuyers])); } catch {}
-  }, [collapsedBuyers]);
+    try { localStorage.setItem("expandedBuyers", JSON.stringify([...expandedBuyers])); } catch {}
+  }, [expandedBuyers]);
   const toggleBuyerCollapse = (key) => {
-    setCollapsedBuyers(prev => {
+    setExpandedBuyers(prev => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   };
   const collapseAllBuyers = (eventId) => {
-    const evt = events.find(e => e.id === eventId);
-    if (!evt) return;
-    setCollapsedBuyers(prev => {
+    // 把此場次的 buyer 從 expanded set 移除 = 全部收合
+    setExpandedBuyers(prev => {
       const next = new Set(prev);
-      (evt.buyers || []).forEach(b => next.add(`${eventId}:${b.name}`));
+      [...next].forEach(k => { if (k.startsWith(`${eventId}:`)) next.delete(k); });
       return next;
     });
   };
   const expandAllBuyers = (eventId) => {
-    setCollapsedBuyers(prev => {
+    // 把此場次所有 buyer 加進 expanded set = 全部展開
+    const evt = events.find(e => e.id === eventId);
+    if (!evt) return;
+    setExpandedBuyers(prev => {
       const next = new Set(prev);
-      [...next].forEach(k => { if (k.startsWith(`${eventId}:`)) next.delete(k); });
+      (evt.buyers || []).forEach(b => next.add(`${eventId}:${b.name}`));
       return next;
     });
   };
@@ -4482,7 +4485,7 @@ function MainApp() {
               {/* Expanded */}
               {isExp&&(<div style={{ padding:"0 18px 16px",borderTop:"1px solid #f0ede8" }}>
                 {(evt.buyers||[]).length >= 3 && (() => {
-                  const allCollapsed = (evt.buyers||[]).every(b => collapsedBuyers.has(`${evt.id}:${b.name}`));
+                  const allCollapsed = (evt.buyers||[]).every(b => !expandedBuyers.has(`${evt.id}:${b.name}`));
                   return (
                     <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6 }}>
                       <span style={{ fontSize:10,color:"#a09080" }}>{(evt.buyers||[]).length} 位訂購人</span>
@@ -4502,7 +4505,7 @@ function MainApp() {
                     const scMain = BUYER_STATUS[primarySt] || BUYER_STATUS.normal;
                     const isAddingBatch = addingBatch && addingBatch.eventId===evt.id && addingBatch.idx===i;
                     const collapseKey = `${evt.id}:${b.name}`;
-                    const isCollapsed = collapsedBuyers.has(collapseKey);
+                    const isCollapsed = !expandedBuyers.has(collapseKey);
                     return (<div key={i} style={{ padding:"10px 12px",borderRadius:10,background:scMain.bg,border:`1px solid ${scMain.color}22` }}>
                       <div style={{ display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
                         <button onClick={()=>toggleBuyerCollapse(collapseKey)}
