@@ -3131,10 +3131,12 @@ function MainApp() {
     return () => clearInterval(timer);
   }, [events, buyerNames, logs, confirmModal, editingPrice, editingName, editingDetail, addingBatch, editingBatch, inputModal, identityExportModal, editingCatalogKey, buyerExportModal, dataDiffModal, importIdentityModal, realnameLinkModal]);
 
-  const activeEvents = events.filter(e => e.status === "active");
+  const activeEventsAll = events.filter(e => e.status === "active");
+  const emptyEvents = activeEventsAll.filter(e => (e.buyers || []).length === 0);
+  const activeEvents = activeEventsAll.filter(e => (e.buyers || []).length > 0);
   const pickedEvents = events.filter(e => e.status === "picked");
   const doneEvents = events.filter(e => e.status === "done");
-  const displayEvents = tab === "active" ? activeEvents : tab === "picked" ? pickedEvents : doneEvents;
+  const displayEvents = tab === "active" ? activeEvents : tab === "empty" ? emptyEvents : tab === "picked" ? pickedEvents : doneEvents;
   const filtered = displayEvents.filter(e => { if (!search) return true; const s = search.toLowerCase(); return e.name.toLowerCase().includes(s) || e.buyers?.some(b => b.name.toLowerCase().includes(s)); });
   const totalTickets = activeEvents.reduce((s, e) => s + (e.buyers || []).reduce((a, b) => a + buyerTotalQty(b), 0), 0);
   // 全域總覽(包含已取票、已完成,跟每日快照比較用)
@@ -4199,7 +4201,7 @@ function MainApp() {
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
               const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -4259,7 +4261,7 @@ function MainApp() {
         {!showLog&&(
           <div style={{ display:"flex",gap:8,marginBottom:16,flexWrap:"wrap" }}>
             <input placeholder="搜尋場次或訂購人..." value={search} onChange={e=>setSearch(e.target.value)} style={{ flex:1,minWidth:160,padding:"10px 14px",borderRadius:10,border:"1.5px solid #d4d0c8",fontSize:14,background:"#faf9f6",fontFamily:"inherit" }}/>
-            <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
+            <button onClick={()=>setShowAddEvent(true)} style={{ padding:"10px 16px",borderRadius:10,border:"none",background:"#2d2a26",color:"#faf9f6",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",display:["active","empty","picked","done"].includes(tab)?"inline-block":"none" }}>＋ 新增場次</button>
             <button onClick={exportCSV} style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d4d0c8",background:"#fff",fontSize:12,cursor:"pointer",fontWeight:600,color:"#666",fontFamily:"inherit" }}>匯出CSV</button>
             {tab==="active"&&<button onClick={exportImage} title="把進行中場次存成一張圖，可傳到 LINE 隨時查看" style={{ padding:"10px 12px",borderRadius:10,border:"1.5px solid #d8c4a8",background:"#faf3e8",fontSize:12,cursor:"pointer",fontWeight:700,color:"#8b6a2d",fontFamily:"inherit" }}>🖼️ 匯出圖片</button>}
             {tab==="buyers"&&(()=>{
@@ -4713,13 +4715,15 @@ function MainApp() {
                                     <span onClick={()=>setExpandedIdentity(isOpen?null:ekey)} title="點此設定上游"
                                       style={{ fontSize:10,fontWeight:700,padding:"1px 7px",borderRadius:5,background:"#fafafa",color:"#999",border:"1px dashed #ccc",cursor:"pointer" }}>+ 上游</span>
                                   )}
-                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) */}
-                                  {is4LayerMode && subItems.length > 0 && (
-                                    subDiff === 0
-                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
-                                      : subDiff > 0
-                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
-                                        : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
+                                  {/* 細項實名指示器 (僅 4 層 mode 顯示) — 永遠顯示讓樣式統一 */}
+                                  {is4LayerMode && (
+                                    subItems.length === 0
+                                      ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 0/{itQty} 缺 {itQty}</span>
+                                      : subDiff === 0
+                                        ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#dfeadf",color:"#3a7a3a" }}>📝 實名 {subQty}/{itQty} ✓</span>
+                                        : subDiff > 0
+                                          ? <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#fce8e8",color:"#8b3a3a" }}>📝 實名 {subQty}/{itQty} 缺 {subDiff}</span>
+                                          : <span style={{ fontSize:10,fontWeight:700,padding:"1px 6px",borderRadius:5,background:"#f6ecd8",color:"#8b6a2d" }}>📝 實名 {subQty}/{itQty} 多 {-subDiff}</span>
                                   )}
                                   {is4LayerMode && (
                                     <button onClick={()=>openIdentityRealnameLink(evt.id,i,it.id)}
