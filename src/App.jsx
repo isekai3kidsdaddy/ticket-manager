@@ -4200,8 +4200,7 @@ function MainApp() {
           </div>
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
-              const pendingTotal = events.filter(e=>e.status==="active"||e.status==="picked").reduce((s,e)=>s+countPendingFlag(e.buyers,"needRealName","gotRealName")+countPendingFlag(e.buyers,"needSid","gotSid")+countPendingFlag(e.buyers,"ticketDelivered","photoReceived"),0);
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"pending",label:`📋 待收${pendingTotal>0?` (${pendingTotal})`:""}`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -5004,46 +5003,7 @@ function MainApp() {
 
         {/* Pending (待收) view */}
         {!showLog&&tab==="pending"&&(<div style={{ display:"flex",flexDirection:"column",gap:14 }}>
-          {(() => {
-            const activeOnly = events.filter(e => e.status === "active" || e.status === "picked");
-            const realNameItems = []; const sidItems = []; const photoItems = [];
-            activeOnly.forEach(evt => {
-              (evt.buyers || []).forEach((b, bi) => {
-                if (b.needRealName && !b.gotRealName) realNameItems.push({ evt, b, bi });
-                if (b.needSid && !b.gotSid) sidItems.push({ evt, b, bi });
-                if (b.ticketDelivered && !b.photoReceived) photoItems.push({ evt, b, bi });
-              });
-            });
-            const renderSection = (title, icon, color, bg, items, gotFlag) => (
-              <div style={{ background:"#fff",borderRadius:14,border:"1px solid #e4e0d8",overflow:"hidden",borderLeft:`4px solid ${color}` }}>
-                <div style={{ padding:"12px 18px",background:bg,borderBottom:"1px solid #f0ede8",fontWeight:700,fontSize:15,color,display:"flex",alignItems:"baseline",gap:10 }}>
-                  <span>{icon} {title}</span>
-                  <span style={{ fontSize:12,fontWeight:500,color:"#999" }}>{items.length} 筆</span>
-                </div>
-                {items.length === 0 ? (
-                  <div style={{ padding:"20px",textAlign:"center",color:"#9b9588",fontSize:13 }}>沒有待收項目 🎉</div>
-                ) : (
-                  <div style={{ padding:"10px 14px",display:"flex",flexDirection:"column",gap:6 }}>
-                    {items.map(({evt,b,bi},i)=>(
-                      <div key={i} style={{ padding:"8px 12px",borderRadius:8,background:bg,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap" }}>
-                        <span style={{ fontWeight:700,fontSize:13,color:"#2d2a26",minWidth:0 }}>{b.name}</span>
-                        <span style={{ fontSize:12,color:"#666" }}>· {evt.name}</span>
-                        <span style={{ fontSize:11,color:"#999" }}>共 {buyerTotalQty(b)} 張</span>
-                        <button onClick={()=>toggleBuyerFlag(evt.id,bi,gotFlag)} style={{ marginLeft:"auto",padding:"4px 12px",borderRadius:7,border:`1px solid ${color}`,background:"#fff",fontSize:11,cursor:"pointer",fontWeight:700,color,fontFamily:"inherit" }}>標記為已收 ✅</button>
-                        <button onClick={()=>jumpToEvent(evt.id,evt.status)} style={{ padding:"4px 10px",borderRadius:7,border:"1px solid #d4d0c8",background:"#fff",fontSize:11,cursor:"pointer",fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>前往</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-            return (<>
-              {renderSection("待收實名資料","📝","#a86a30","#fff3e0",realNameItems,"gotRealName")}
-              {renderSection("待收 SID 碼","🎟","#7a5a8b","#f3edf8",sidItems,"gotSid")}
-              {renderSection("待回傳照片","📸","#3a7a8b","#e0f0f6",photoItems,"photoReceived")}
-              <div style={{ textAlign:"center",fontSize:11,color:"#a09888",padding:"6px 0" }}>* 統計範圍：進行中 + 已取票場次</div>
-            </>);
-          })()}
+          {/* 待收 tab 已移除 — 保留 tab key 相容性,但不再顯示內容 */}
         </div>)}
 
         {/* Buyers (訂購人) view */}
