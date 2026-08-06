@@ -4420,8 +4420,8 @@ function MainApp() {
         })()}
 
         {/* Event cards */}
-        {!showLog&&["active","picked","done"].includes(tab)&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
-          {filtered.length===0&&<div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":"目前沒有場次"}</div>}
+        {!showLog&&["active","empty","picked","done"].includes(tab)&&(<div style={{ display:"flex",flexDirection:"column",gap:10 }}>
+          {filtered.length===0&&<div style={{ textAlign:"center",padding:40,color:"#999" }}>{search?"找不到結果":tab==="empty"?"目前沒有開單但沒人訂的場次":"目前沒有場次"}</div>}
           {filtered.map(evt=>{
             const isExp=expandedId===evt.id, buyerTotal=(evt.buyers||[]).reduce((s,b)=>s+buyerTotalQty(b),0);
             const hasUnpaid=(evt.buyers||[]).some(b=>buyerHasStatus(b,"unpaid")), hasRefund=(evt.buyers||[]).some(b=>buyerHasStatus(b,"refund"));
