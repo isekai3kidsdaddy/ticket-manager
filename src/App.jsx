@@ -2075,6 +2075,23 @@ function MainApp() {
       return next;
     });
   };
+  // 按訂購時間排序的場次 (per-event toggle,存 localStorage)
+  const [sortByTimeEvents, setSortByTimeEvents] = useState(() => {
+    try {
+      const saved = localStorage.getItem("sortByTimeEvents");
+      return new Set(saved ? JSON.parse(saved) : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("sortByTimeEvents", JSON.stringify([...sortByTimeEvents])); } catch {}
+  }, [sortByTimeEvents]);
+  const toggleSortByTime = (eventId) => {
+    setSortByTimeEvents(prev => {
+      const next = new Set(prev);
+      if (next.has(eventId)) next.delete(eventId); else next.add(eventId);
+      return next;
+    });
+  };
 
   const openRealnameLink = (eventId, buyerIdx) => {
     const evt = events.find(e => e.id === eventId);
@@ -3591,7 +3608,7 @@ function MainApp() {
           e.buyers.push({
             name: buyerName,
             qty: totalQ,
-            batches: [{ qty: totalQ, st: "normal", detail: "" }],
+            batches: [{ qty: totalQ, st: "normal", detail: "", addedAt: Date.now() }],
             identities: [],
             addedAt: Date.now(),
           });
@@ -4485,21 +4502,42 @@ function MainApp() {
 
               {/* Expanded */}
               {isExp&&(<div style={{ padding:"0 18px 16px",borderTop:"1px solid #f0ede8" }}>
-                {(evt.buyers||[]).length >= 3 && (() => {
+                {(evt.buyers||[]).length >= 2 && (() => {
                   const allCollapsed = (evt.buyers||[]).every(b => !expandedBuyers.has(`${evt.id}:${b.name}`));
+                  const isSortedByTime = sortByTimeEvents.has(evt.id);
                   return (
-                    <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6 }}>
+                    <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                       <span style={{ fontSize:10,color:"#a09080" }}>{(evt.buyers||[]).length} 位訂購人</span>
-                      <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
-                        title={allCollapsed ? "展開所有訂購人卡片" : "收合所有訂購人卡片(只看標頭,方便快速找人)"}
-                        style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>
-                        {allCollapsed ? "▸ 全部展開" : "▾ 全部收合"}
+                      <button onClick={()=>toggleSortByTime(evt.id)}
+                        title={isSortedByTime ? "按時間排序中 — 最早訂購的在最上面。點此關掉,回到手動順序" : "按訂購時間排序 (最早的在最上面,方便給優先票)"}
+                        style={{ padding:"3px 10px",borderRadius:6,border:`1px solid ${isSortedByTime?"#8b6a2d":"#d4d0c8"}`,background:isSortedByTime?"#faf3e8":"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:isSortedByTime?"#8b6a2d":"#8b7355",fontFamily:"inherit" }}>
+                        🕒 {isSortedByTime ? "時間排序中" : "按時間排序"}
                       </button>
+                      {(evt.buyers||[]).length >= 3 && (
+                        <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
+                          title={allCollapsed ? "展開所有訂購人卡片" : "收合所有訂購人卡片(只看標頭,方便快速找人)"}
+                          style={{ padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>
+                          {allCollapsed ? "▸ 全部展開" : "▾ 全部收合"}
+                        </button>
+                      )}
                     </div>
                   );
                 })()}
                 <div style={{ marginTop:12,display:"flex",flexDirection:"column",gap:8 }}>
-                  {(evt.buyers||[]).map((b,i)=>{
+                  {(() => {
+                    const raw = (evt.buyers||[]).map((b,origIdx)=>({b,origIdx}));
+                    if (sortByTimeEvents.has(evt.id)) {
+                      // 按 addedAt asc (最早在最上);沒 addedAt 的排最後
+                      raw.sort((a,b)=>{
+                        const at = a.b.addedAt || Infinity;
+                        const bt = b.b.addedAt || Infinity;
+                        if (at !== bt) return at - bt;
+                        return a.origIdx - b.origIdx;
+                      });
+                    }
+                    return raw;
+                  })().map(({b,origIdx})=>{
+                    const i = origIdx;
                     const batches = getBatches(b);
                     const totalQ = batches.reduce((s,x)=>s+x.qty,0);
                     const primarySt = buyerPrimaryStatus(b);
@@ -4526,6 +4564,32 @@ function MainApp() {
                           onBlur={e=>{e.target.style.background="transparent";e.target.style.border="1px solid transparent";}}
                         />
                         <span style={{ fontSize:13,fontWeight:700,color:"#555" }}>共 {totalQ} 張</span>
+                        {b.addedAt && (() => {
+                          const first = new Date(b.addedAt);
+                          const now = new Date();
+                          const fmt = (d) => {
+                            const sy = d.getFullYear() === now.getFullYear();
+                            return sy ? `${d.getMonth()+1}/${d.getDate()}` : `${d.getFullYear().toString().slice(-2)}/${d.getMonth()+1}/${d.getDate()}`;
+                          };
+                          const fmtFull = (d) => d.toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+                          // 找所有追加 batches (晚於首批 12hr 以上)
+                          const supplementary = batches
+                            .filter(bt => bt.addedAt && (bt.addedAt - b.addedAt) > 12*3600*1000)
+                            .sort((a,c) => a.addedAt - c.addedAt);
+                          const supCount = supplementary.length;
+                          const supQty = supplementary.reduce((s,bt)=>s+(bt.qty||0),0);
+                          // Tooltip:列出所有 batches 時間軸
+                          const timeline = [`首批: ${fmtFull(first)}`];
+                          supplementary.forEach((bt, idx) => {
+                            timeline.push(`追加 ${idx+1}: ${fmtFull(new Date(bt.addedAt))}  · ${bt.qty}張 ${BUYER_STATUS[bt.st]?.label || bt.st}${bt.detail?` (${bt.detail})`:""}`);
+                          });
+                          return (
+                            <span title={timeline.join("\n")}
+                              style={{ fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:10,background:supCount>0?"#fff4e0":"#f0ede4",color:supCount>0?"#a86a30":"#8b7355",whiteSpace:"nowrap",border:supCount>0?"1px solid #d8b088":"none" }}>
+                              🕒 {supCount>0 ? `首批 ${fmt(first)} · +${supCount} 追加 (${supQty} 張)` : fmt(first)}
+                            </span>
+                          );
+                        })()}
                         {(() => {
                           // 上游分流:依 batch.detail 抓「X供」分組
                           const supTotals = {};
@@ -4905,6 +4969,8 @@ function MainApp() {
                               onSave={(v)=>{updateBatch(evt.id,i,bi,v);setEditingBatch(null);}}
                               onCancel={()=>setEditingBatch(null)}/>);
                           }
+                          // 追加判定:batch.addedAt 比 buyer.addedAt 晚超過 12 小時 → 視為追加
+                          const isSupplementary = bt.addedAt && b.addedAt && (bt.addedAt - b.addedAt) > 12*3600*1000;
                           return (<div key={bi} style={{ padding:"6px 10px",borderRadius:8,background:"rgba(255,255,255,.7)",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:13 }}>
                             <div style={{ display:"flex",alignItems:"center",gap:4 }}>
                               <button className="qty-btn" style={{ width:22,height:22,fontSize:13 }} onClick={()=>bt.qty>1&&updateBatch(evt.id,i,bi,{qty:bt.qty-1})}>−</button>
@@ -4914,6 +4980,18 @@ function MainApp() {
                             </div>
                             <span style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,background:sc.bg,color:sc.color,border:`1px solid ${sc.color}` }}>{sc.icon} {sc.label}</span>
                             {bt.detail && <span style={{ fontSize:12,color:sc.color }}>{bt.st==="picked"?"🎫":bt.st==="refund"?"↩":bt.st==="refunded"?"✅":""} {bt.detail}</span>}
+                            {bt.addedAt && (() => {
+                              const d = new Date(bt.addedAt);
+                              const now = new Date();
+                              const sy = d.getFullYear() === now.getFullYear();
+                              const ds = sy ? `${d.getMonth()+1}/${d.getDate()}` : `${d.getFullYear().toString().slice(-2)}/${d.getMonth()+1}/${d.getDate()}`;
+                              return (
+                                <span title={`此分批新增時間: ${d.toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}${isSupplementary?" (晚於首批,視為追加)":""}`}
+                                  style={{ fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:10,background:isSupplementary?"#fff4e0":"#f0ede4",color:isSupplementary?"#a86a30":"#8b7355",whiteSpace:"nowrap",border:isSupplementary?"1px solid #d8b088":"none" }}>
+                                  🕒 {ds}{isSupplementary ? " 追加" : ""}
+                                </span>
+                              );
+                            })()}
                             <button onClick={()=>{setEditingBatch({eventId:evt.id,idx:i,bi});setAddingBatch(null);}} style={{ marginLeft:"auto",padding:"3px 10px",borderRadius:6,border:"1px solid #d4d0c8",background:"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:"#8b7355",fontFamily:"inherit" }}>編輯</button>
                             {batches.length>1&&<button onClick={()=>removeBatch(evt.id,i,bi)} style={{ width:22,height:22,borderRadius:5,border:"1px solid #e8c4c4",background:"#fff",cursor:"pointer",fontSize:11,color:"#c47070",fontFamily:"inherit" }} title="移除此分批">×</button>}
                           </div>);
