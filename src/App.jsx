@@ -72,13 +72,40 @@ function countPendingFlag(buyers, needFlag, gotFlag) {
 }
 
 // Inline editor for creating/editing a single batch (qty + status + detail)
-function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onCancel, canEditQty = true }) {
+function BatchEditor({ initialQty, initialSt, initialDetail, initialAddedAt, maxQty, onSave, onCancel, canEditQty = true }) {
   const [qty, setQty] = useState(initialQty || 1);
   const [st, setSt] = useState(initialSt || "normal");
   const [detail, setDetail] = useState(initialDetail || "");
+  // 日期 (yyyy-mm-dd) — 沒 initialAddedAt 就用今天
+  const [dateStr, setDateStr] = useState(() => {
+    const d = initialAddedAt ? new Date(initialAddedAt) : new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  });
   const showDetail = st === "picked" || st === "refund" || st === "refunded";
   const label = st === "picked" ? "取票明細" : (st === "refund" || st === "refunded") ? "退費金額" : "";
   const ph = st === "picked" ? "例：2張6880、2張5880" : (st === "refund" || st === "refunded") ? "例：2000" : "";
+  const buildPayload = () => {
+    const payload = { qty, st, detail };
+    // 若使用者改了日期,把 addedAt 更新;若沒 initialAddedAt (舊 batch) 且用戶選了日期,也存
+    if (dateStr) {
+      const [y,m,d] = dateStr.split("-").map(Number);
+      const chosen = new Date(y, m-1, d);
+      // 只在日期跟 initial 不同時 (或原本沒 addedAt) 才更新
+      const initialDay = initialAddedAt ? (() => {
+        const d0 = new Date(initialAddedAt);
+        return `${d0.getFullYear()}-${String(d0.getMonth()+1).padStart(2,"0")}-${String(d0.getDate()).padStart(2,"0")}`;
+      })() : null;
+      if (!initialAddedAt || dateStr !== initialDay) {
+        // 保留原本的時分秒 (若有的話),只換日期
+        if (initialAddedAt) {
+          const orig = new Date(initialAddedAt);
+          chosen.setHours(orig.getHours(), orig.getMinutes(), orig.getSeconds(), 0);
+        }
+        payload.addedAt = chosen.getTime();
+      }
+    }
+    return payload;
+  };
   return (
     <div onClick={e=>e.stopPropagation()} style={{ marginTop:6, padding:"10px 12px", borderRadius:8, border:"1.5px dashed #c4b89a", background:"#fff9ec", display:"flex", flexDirection:"column", gap:8 }}>
       {canEditQty && (
@@ -99,13 +126,19 @@ function BatchEditor({ initialQty, initialSt, initialDetail, maxQty, onSave, onC
         <div style={{ display:"flex", gap:6, alignItems:"center" }}>
           <span style={{ fontSize:12, fontWeight:600, color:"#888", whiteSpace:"nowrap" }}>{label}：</span>
           <input autoFocus value={detail} onChange={e=>setDetail(e.target.value)} placeholder={ph}
-            onKeyDown={e=>{ if(e.key==="Enter") onSave({qty,st,detail}); if(e.key==="Escape") onCancel(); }}
+            onKeyDown={e=>{ if(e.key==="Enter") onSave(buildPayload()); if(e.key==="Escape") onCancel(); }}
             style={{ flex:1, padding:"6px 10px", borderRadius:7, border:"1.5px solid #d4d0c8", fontSize:13, fontFamily:"inherit", background:"#fff", minWidth:0 }}/>
         </div>
       )}
+      <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+        <span style={{ fontSize:12, fontWeight:600, color:"#888", whiteSpace:"nowrap" }}>訂購日期：</span>
+        <input type="date" value={dateStr} onChange={e=>setDateStr(e.target.value)}
+          style={{ padding:"5px 8px", borderRadius:7, border:"1.5px solid #d4d0c8", fontSize:13, fontFamily:"inherit", background:"#fff" }}/>
+        <span style={{ fontSize:11, color:"#a09080" }}>{initialAddedAt ? "改日期會覆蓋原本記錄" : "預設今天,若是補記舊訂單請改"}</span>
+      </div>
       <div style={{ display:"flex", gap:6, justifyContent:"flex-end" }}>
         <button onClick={onCancel} style={{ padding:"5px 12px", borderRadius:7, border:"1px solid #d4d0c8", background:"#fff", fontSize:12, cursor:"pointer", fontFamily:"inherit", color:"#999" }}>取消</button>
-        <button onClick={()=>onSave({qty,st,detail})} style={{ padding:"5px 14px", borderRadius:7, border:"none", background:"#2d2a26", color:"#faf9f6", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>確認</button>
+        <button onClick={()=>onSave(buildPayload())} style={{ padding:"5px 14px", borderRadius:7, border:"none", background:"#2d2a26", color:"#faf9f6", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>確認</button>
       </div>
     </div>
   );
@@ -3759,7 +3792,11 @@ function MainApp() {
       if (updates.qty !== undefined && updates.qty !== cur.qty) parts.push(`張數 ${cur.qty}→${updates.qty}`);
       if (updates.st !== undefined && updates.st !== cur.st) parts.push(`狀態→${BUYER_STATUS[updates.st]?.label || updates.st}`);
       if (updates.detail !== undefined && updates.detail !== (cur.detail||"")) parts.push("明細更新");
-      if (parts.length > 0) addLog(`【${evt.name}】${b.name} 分批：${parts.join("、")}`, snap());
+      if (updates.addedAt !== undefined && updates.addedAt !== cur.addedAt) {
+        const fmt = (t) => t ? new Date(t).toLocaleDateString("zh-TW") : "無";
+        parts.push(`訂購日期 ${fmt(cur.addedAt)}→${fmt(updates.addedAt)}`);
+      }
+      if (parts.length > 0) addLog(`【${evt.name}】${b.name} 分批:${parts.join("、")}`, snap());
     }
     updateEvent(eventId, e => {
       const nb = migrateBuyer(e.buyers[idx]);
@@ -3774,7 +3811,8 @@ function MainApp() {
     if (b) addLog(`【${evt.name}】${b.name}:新增分批 ${batch.qty}張 ${BUYER_STATUS[batch.st]?.label||batch.st}`, snap());
     updateEvent(eventId, e => {
       const nb = migrateBuyer(e.buyers[idx]);
-      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "", addedAt: Date.now() }];
+      // 使用者輸入的 addedAt 優先,沒指定才用 Date.now()
+      nb.batches = [...nb.batches, { qty: batch.qty, st: batch.st, detail: batch.detail || "", addedAt: batch.addedAt || Date.now() }];
       nb.qty = nb.batches.reduce((s, x) => s + x.qty, 0);
       e.buyers[idx] = nb; return e;
     });
@@ -4509,9 +4547,9 @@ function MainApp() {
                     <div style={{ marginTop:10,display:"flex",justifyContent:"flex-end",alignItems:"center",gap:6,flexWrap:"wrap" }}>
                       <span style={{ fontSize:10,color:"#a09080" }}>{(evt.buyers||[]).length} 位訂購人</span>
                       <button onClick={()=>toggleSortByTime(evt.id)}
-                        title={isSortedByTime ? "按時間排序中 — 最早訂購的在最上面。點此關掉,回到手動順序" : "按訂購時間排序 (最早的在最上面,方便給優先票)"}
+                        title={isSortedByTime ? "✓ 已按時間排序 — 最早訂購的在最上面。點此關掉,回到手動順序" : "按訂購時間排序 (最早的在最上面,方便給優先票)"}
                         style={{ padding:"3px 10px",borderRadius:6,border:`1px solid ${isSortedByTime?"#8b6a2d":"#d4d0c8"}`,background:isSortedByTime?"#faf3e8":"#fff",cursor:"pointer",fontSize:11,fontWeight:600,color:isSortedByTime?"#8b6a2d":"#8b7355",fontFamily:"inherit" }}>
-                        🕒 {isSortedByTime ? "時間排序中" : "按時間排序"}
+                        {isSortedByTime ? "✓ 已按時間排序" : "🕒 按時間排序"}
                       </button>
                       {(evt.buyers||[]).length >= 3 && (
                         <button onClick={()=>allCollapsed ? expandAllBuyers(evt.id) : collapseAllBuyers(evt.id)}
@@ -4965,7 +5003,7 @@ function MainApp() {
                           const sc = BUYER_STATUS[bt.st] || BUYER_STATUS.normal;
                           const isEditing = editingBatch && editingBatch.eventId===evt.id && editingBatch.idx===i && editingBatch.bi===bi;
                           if (isEditing) {
-                            return (<BatchEditor key={bi} initialQty={bt.qty} initialSt={bt.st} initialDetail={bt.detail||""} maxQty={totalQ}
+                            return (<BatchEditor key={bi} initialQty={bt.qty} initialSt={bt.st} initialDetail={bt.detail||""} initialAddedAt={bt.addedAt} maxQty={totalQ}
                               onSave={(v)=>{updateBatch(evt.id,i,bi,v);setEditingBatch(null);}}
                               onCancel={()=>setEditingBatch(null)}/>);
                           }
