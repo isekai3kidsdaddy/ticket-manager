@@ -2107,13 +2107,19 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
 
   const parseUrl = async () => {
     if (!urlInput.trim() && !pasteText.trim()) { setUrlErr("請貼上網址或頁面文字"); return; }
+    // 網址欄貼的不是網址(例如整頁文字)→ 自動當頁面文字處理
+    const u0 = urlInput.trim();
+    const isUrl = /^https?:\/\/\S+$/i.test(u0);
+    const textBody = pasteText.trim() || (!isUrl && u0.length > 20 ? u0 : "");
+    const bodyObj = textBody ? { text: textBody } : { url: u0 };
+    if (!textBody && !isUrl) { setUrlErr("網址格式不對,請貼 https:// 開頭的網址,或展開下方貼頁面文字"); return; }
     setParsing(true); setUrlErr(""); setDraft(null);
     try {
-      const r = await fetch("/api/parse-concert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pasteText.trim() ? { text: pasteText } : { url: urlInput.trim() }) });
+      const r = await fetch("/api/parse-concert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { setUrlErr(j.error || `解析失敗 (${r.status})`); }
       else if (!j.events || j.events.length === 0) { setUrlErr("沒有在內容中找到未來的演出日期,可能不是演出頁面,或請改貼頁面文字"); }
-      else setDraft(j.events.map(ev => ({ on: true, name: ev.name || "", venue: ev.venue || "", datesText: (ev.dates || []).join(", "), aliases: (ev.aliases || []).join(", "), url: pasteText.trim() ? "" : (j.url || urlInput.trim()), confidence: ev.confidence ?? 0.8, notes: ev.notes || "" })));
+      else setDraft(j.events.map(ev => ({ on: true, name: ev.name || "", venue: ev.venue || "", datesText: (ev.dates || []).join(", "), aliases: (ev.aliases || []).join(", "), url: textBody ? "" : (j.url || u0), confidence: ev.confidence ?? 0.8, notes: ev.notes || "" })));
     } catch (e) { setUrlErr("無法連線到解析服務:" + e.message); }
     setParsing(false);
   };
