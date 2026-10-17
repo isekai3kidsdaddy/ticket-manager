@@ -2123,14 +2123,34 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
     } catch (e) { setUrlErr("無法連線到解析服務:" + e.message); }
     setParsing(false);
   };
+  // 重複偵測:日期有重疊 + 名稱相似(含別名、城市檢查)
+  const findDup = (d) => {
+    const dates = d.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+    if (!d.name.trim() || dates.length === 0) return null;
+    const hits = rows.filter(r => dates.includes(String(r.event_date)) && (
+      concertNameScore([r.name, ...(r.aliases || [])], d.name, concertCities(r.name)) >= 0.6 ||
+      concertNameScore([d.name, ...d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean)], r.name, concertCities(d.name)) >= 0.6
+    ));
+    if (hits.length === 0) return null;
+    return { hits, overlap: [...new Set(hits.map(h => String(h.event_date)))], name: hits[0].name };
+  };
   const saveDraft = async () => {
     const recs = [];
+    const delIds = [];
     for (const d of draft.filter(x => x.on)) {
       const dates = d.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
       if (!d.name.trim() || dates.length === 0) { alert(`「${d.name || "(未命名)"}」缺名稱或日期 (YYYY-MM-DD),請修正或取消勾選`); return; }
-      dates.forEach(dt => recs.push({ name: d.name.trim(), event_date: dt, venue: d.venue.trim() || null, url: d.url || null, aliases: d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: d.confidence, status: "approved" }));
+      const dup = findDup(d);
+      const act = dup ? (d.action || "skip") : "add";
+      if (dup && act === "replace") dup.hits.forEach(h => delIds.push(h.id));
+      const useDates = dup && act === "skip" ? dates.filter(dt => !dup.overlap.includes(dt)) : dates;
+      useDates.forEach(dt => recs.push({ name: d.name.trim(), event_date: dt, venue: d.venue.trim() || null, url: d.url || null, aliases: d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: d.confidence, status: "approved" }));
     }
-    if (recs.length === 0) { alert("沒有勾選任何演出"); return; }
+    if (recs.length === 0) { alert("沒有要新增的演出(勾選的都因重複而略過了)"); return; }
+    if (delIds.length) {
+      const { error: de } = await supabase.from("taiwan_concerts").delete().in("id", delIds);
+      if (de) { alert("取代舊資料失敗:" + de.message); return; }
+    }
     const { error } = await supabase.from("taiwan_concerts").upsert(recs, { onConflict: "name,event_date", ignoreDuplicates: true });
     if (error) { alert("新增失敗:" + error.message); return; }
     setDraft(null); setUrlInput(""); setPasteText(""); setUrlOpen(false); setUrlErr("");
@@ -2295,6 +2315,20 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
                     <input style={inp} value={d.venue} onChange={e => upd({ venue: e.target.value })} placeholder="場地" />
                     <input style={inp} value={d.datesText} onChange={e => upd({ datesText: e.target.value })} placeholder="日期 YYYY-MM-DD,逗號分隔" />
                     {d.notes && <div style={{ gridColumn: "1 / -1", fontSize: 11, color: "#a07a10" }}>AI 備註:{d.notes}</div>}
+                    {(() => {
+                      const dup = findDup(d);
+                      if (!dup) return null;
+                      return (
+                        <div style={{ gridColumn: "1 / -1", background: "#fdf3e0", border: "1px solid #e0c070", borderRadius: 8, padding: "6px 10px", fontSize: 12, color: "#7a5a10", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                          ⚠️ 可能和日曆裡的「{dup.name}」({dup.overlap.map(x => x.slice(5).replace("-", "/")).join("、")}) 重複
+                          <select value={d.action || "skip"} onChange={e => upd({ action: e.target.value })} style={{ padding: "3px 6px", borderRadius: 6, border: "1px solid #d4d0c8", fontSize: 12, fontFamily: "inherit" }}>
+                            <option value="skip">略過重疊的日期(保留舊的)</option>
+                            <option value="replace">取代舊的</option>
+                            <option value="add">仍要新增(當作不同場)</option>
+                          </select>
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
