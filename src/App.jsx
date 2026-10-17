@@ -2112,15 +2112,19 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
       const r = await fetch("/api/parse-concert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pasteText.trim() ? { text: pasteText } : { url: urlInput.trim() }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { setUrlErr(j.error || `解析失敗 (${r.status})`); }
-      else if (!j.dates || j.dates.length === 0) { setUrlErr("沒有在頁面找到演出日期,可能不是演出頁面,或請改貼頁面文字"); }
-      else setDraft({ name: j.name || "", venue: j.venue || "", datesText: j.dates.join("\n"), aliases: (j.aliases || []).join(", "), url: urlInput.trim() ? (j.url || urlInput.trim()) : "", confidence: j.confidence ?? 0.8, notes: j.notes || "" });
+      else if (!j.events || j.events.length === 0) { setUrlErr("沒有在內容中找到未來的演出日期,可能不是演出頁面,或請改貼頁面文字"); }
+      else setDraft(j.events.map(ev => ({ on: true, name: ev.name || "", venue: ev.venue || "", datesText: (ev.dates || []).join(", "), aliases: (ev.aliases || []).join(", "), url: pasteText.trim() ? "" : (j.url || urlInput.trim()), confidence: ev.confidence ?? 0.8, notes: ev.notes || "" })));
     } catch (e) { setUrlErr("無法連線到解析服務:" + e.message); }
     setParsing(false);
   };
   const saveDraft = async () => {
-    const dates = draft.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
-    if (!draft.name.trim() || dates.length === 0) { alert("名稱與至少一個日期 (YYYY-MM-DD) 必填"); return; }
-    const recs = dates.map(d => ({ name: draft.name.trim(), event_date: d, venue: draft.venue.trim() || null, url: draft.url || null, aliases: draft.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: draft.confidence, status: "approved" }));
+    const recs = [];
+    for (const d of draft.filter(x => x.on)) {
+      const dates = d.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+      if (!d.name.trim() || dates.length === 0) { alert(`「${d.name || "(未命名)"}」缺名稱或日期 (YYYY-MM-DD),請修正或取消勾選`); return; }
+      dates.forEach(dt => recs.push({ name: d.name.trim(), event_date: dt, venue: d.venue.trim() || null, url: d.url || null, aliases: d.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: d.confidence, status: "approved" }));
+    }
+    if (recs.length === 0) { alert("沒有勾選任何演出"); return; }
     const { error } = await supabase.from("taiwan_concerts").upsert(recs, { onConflict: "name,event_date", ignoreDuplicates: true });
     if (error) { alert("新增失敗:" + error.message); return; }
     setDraft(null); setUrlInput(""); setPasteText(""); setUrlOpen(false); setUrlErr("");
@@ -2262,10 +2266,10 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
       </div>
       {urlOpen && (
         <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 12, color: "#8a8272" }}>貼上演唱會頁面網址(寬宏、拓元、KKTIX、iBon、新聞都可以),AI 會抓出名稱、日期、場地,讓你確認後再存。</div>
+          <div style={{ fontSize: 12, color: "#8a8272" }}>貼上演唱會頁面網址,或展開下方「改貼頁面文字」貼整頁列表(拓元活動列表、KKTIX、寬宏都可以,一次可抽出多場),AI 會抓出名稱、日期、場地,讓你確認後再存。</div>
           <input style={inp} placeholder="https://..." value={urlInput} onChange={e => setUrlInput(e.target.value)} />
           <details style={{ fontSize: 12, color: "#8a8272" }}>
-            <summary style={{ cursor: "pointer" }}>網址抓不到?改貼頁面文字</summary>
+            <summary style={{ cursor: "pointer" }}>網址抓不到(例如拓元)?改貼頁面文字 / 整頁列表</summary>
             <textarea style={{ ...inp, minHeight: 90, marginTop: 6 }} placeholder="在網頁上全選複製,貼在這裡(填了文字就會優先用文字)" value={pasteText} onChange={e => setPasteText(e.target.value)} />
           </details>
           <div style={{ display: "flex", gap: 8 }}>
@@ -2274,13 +2278,21 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
           </div>
           {urlErr && <div style={{ fontSize: 12, color: "#b03a3a" }}>⚠️ {urlErr}</div>}
           {draft && (
-            <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 8 }}>
-              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#4a7a3a", fontWeight: 700 }}>✅ 解析完成,請確認後儲存{draft.notes ? `(AI 備註:${draft.notes})` : ""}</div>
-              <input style={inp} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="演出名稱" />
-              <input style={inp} value={draft.venue} onChange={e => setDraft({ ...draft, venue: e.target.value })} placeholder="場地" />
-              <textarea style={{ ...inp, minHeight: 70 }} value={draft.datesText} onChange={e => setDraft({ ...draft, datesText: e.target.value })} placeholder="日期,每行一個 YYYY-MM-DD" />
-              <input style={inp} value={draft.aliases} onChange={e => setDraft({ ...draft, aliases: e.target.value })} placeholder="別名 (逗號分隔)" />
-              <button style={btn("#8b7355", "#fff")} onClick={saveDraft}>儲存到日曆</button>
+            <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12, color: "#4a7a3a", fontWeight: 700 }}>✅ 找到 {draft.length} 場,請確認(可修改、取消勾選),再儲存</div>
+              {draft.map((d, i) => {
+                const upd = (f) => setDraft(ds => ds.map((x, j) => j === i ? { ...x, ...f } : x));
+                return (
+                  <div key={i} style={{ background: "#fff", border: "1px solid #e0dcd2", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "auto repeat(auto-fit,minmax(150px,1fr))", gap: 6, alignItems: "center", opacity: d.on ? 1 : 0.5 }}>
+                    <input type="checkbox" checked={d.on} onChange={e => upd({ on: e.target.checked })} />
+                    <input style={inp} value={d.name} onChange={e => upd({ name: e.target.value })} placeholder="名稱" />
+                    <input style={inp} value={d.venue} onChange={e => upd({ venue: e.target.value })} placeholder="場地" />
+                    <input style={inp} value={d.datesText} onChange={e => upd({ datesText: e.target.value })} placeholder="日期 YYYY-MM-DD,逗號分隔" />
+                    {d.notes && <div style={{ gridColumn: "1 / -1", fontSize: 11, color: "#a07a10" }}>AI 備註:{d.notes}</div>}
+                  </div>
+                );
+              })}
+              <button style={btn("#8b7355", "#fff")} onClick={saveDraft}>儲存勾選的 {draft.filter(x => x.on).length} 場到日曆</button>
             </div>
           )}
         </div>
