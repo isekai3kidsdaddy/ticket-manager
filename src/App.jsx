@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { SUPABASE_READY, loadFromSupabase, saveToSupabase } from "./supabaseClient";
+import { SUPABASE_READY, supabase, loadFromSupabase, saveToSupabase } from "./supabaseClient";
 import * as InitData from "./initialData";
 const KNOWN_BUYERS = InitData.KNOWN_BUYERS;
 const INITIAL_EVENTS = InitData.INITIAL_EVENTS;
@@ -2030,6 +2030,239 @@ function IdentityExportModal({ events, title, onClose }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ═══════════ 🎵 演唱會日曆 (taiwan_concerts) ═══════════
+const CONCERT_CITIES = ["台北","新北","桃園","新竹","台中","台南","高雄","屏東","宜蘭","花蓮","台東"];
+const CONCERT_NOISE = ["演唱會","巡迴","世界巡迴","巡演","見面會","粉絲見面會","音樂會","fanmeeting","fanmeet","worldtour","tour","live","concert","inconcert","in","taipei","kaohsiung","taiwan","台灣","加場","首爾","encore","final","the","world","fan","meeting"];
+function concertNorm(s) {
+  let t = String(s || "").toLowerCase().replace(/臺/g, "台");
+  t = t.replace(/[\s\-_.,:：;；!！?？'"“”‘’()（）\[\]【】《》<>「」『』~～+＋&×x/\\|·・]/g, "");
+  t = t.replace(/(19|20)\d{2}/g, "");
+  CONCERT_NOISE.slice().sort((a, b) => b.length - a.length).forEach(w => { t = t.split(w).join(""); });
+  return t;
+}
+function concertCities(s) {
+  const t = String(s || "").replace(/臺/g, "台");
+  const out = CONCERT_CITIES.filter(c => t.includes(c));
+  if (/taipei/i.test(t) && !out.includes("台北")) out.push("台北");
+  if (/kaohsiung/i.test(t) && !out.includes("高雄")) out.push("高雄");
+  return out;
+}
+function concertStripCity(t) { let r = t; CONCERT_CITIES.forEach(c => { r = r.split(c).join(""); }); return r; }
+// 回傳 [0..1] 相似度(0 = 不相符)
+function concertNameScore(concertNames, eventName, cityHint) {
+  const evCities = concertCities(eventName);
+  const evCore = concertStripCity(concertNorm(eventName));
+  if (!evCore || evCore.length < 2) return 0;
+  let best = 0;
+  for (const cn of concertNames) {
+    const cCities0 = concertCities(cn);
+    const cCities = cCities0.length ? cCities0 : (cityHint || []);
+    if (evCities.length && cCities.length && !evCities.some(c => cCities.includes(c))) continue; // 城市不同
+    const cCore = concertStripCity(concertNorm(cn));
+    if (!cCore || cCore.length < 2) continue;
+    let sc = 0;
+    if (cCore === evCore) sc = 1;
+    else if (Math.min(cCore.length, evCore.length) >= 3 && (cCore.includes(evCore) || evCore.includes(cCore))) sc = 0.85;
+    if (sc > best) best = sc;
+  }
+  return best;
+}
+function concertMatchEvents(concert, events) {
+  const names = [concert.name, ...(concert.aliases || [])].filter(Boolean);
+  const linked = new Set(concert.linked_event_ids || []);
+  const excluded = new Set(concert.excluded_event_ids || []);
+  const out = [];
+  (events || []).forEach(e => {
+    if (excluded.has(e.id)) return;
+    const isLinked = linked.has(e.id);
+    const sc = isLinked ? 1 : concertNameScore(names, e.name, concertCities(concert.name));
+    if (sc >= 0.6) {
+      const qty = (e.buyers || []).reduce((s, b) => s + buyerTotalQty(b), 0);
+      out.push({ event: e, qty, manual: isLinked, score: sc });
+    }
+  });
+  return out;
+}
+
+function ConcertCalendarTab({ events, jumpToEvent }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [q, setQ] = useState("");
+  const [showPast, setShowPast] = useState(false);
+  const [onlyMine, setOnlyMine] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ name: "", event_date: "", venue: "", url: "", aliases: "" });
+  const [linkingId, setLinkingId] = useState(null);
+
+  const load = async () => {
+    if (!SUPABASE_READY) { setLoading(false); setErr("尚未設定雲端 (Supabase),無法使用演唱會日曆"); return; }
+    setLoading(true); setErr("");
+    const { data, error } = await supabase.from("taiwan_concerts").select("*").order("event_date", { ascending: true });
+    if (error) { setErr(error.message || "讀取失敗"); setRows([]); }
+    else setRows(data || []);
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
+
+  const patch = async (ids, fields) => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const { error } = await supabase.from("taiwan_concerts").update(fields).in("id", list);
+    if (error) { alert("儲存失敗:" + error.message); return; }
+    setRows(rs => rs.map(r => list.includes(r.id) ? { ...r, ...fields } : r));
+  };
+  const remove = async (r) => {
+    const n = (r.ids || [r.id]).length;
+    if (!window.confirm(`刪除「${r.name}」${n > 1 ? `(共 ${n} 天)` : ""}?`)) return;
+    const { error } = await supabase.from("taiwan_concerts").delete().in("id", r.ids || [r.id]);
+    if (error) { alert("刪除失敗:" + error.message); return; }
+    setRows(rs => rs.filter(x => !(r.ids || [r.id]).includes(x.id)));
+  };
+  const submitAdd = async () => {
+    if (!form.name.trim() || !form.event_date) { alert("請至少填演出名稱與日期"); return; }
+    const rec = {
+      name: form.name.trim(), event_date: form.event_date, venue: form.venue.trim() || null, url: form.url.trim() || null,
+      aliases: form.aliases.split(/[,，、\n]/).map(s => s.trim()).filter(Boolean),
+      source: "manual", confidence: 1, status: "approved",
+    };
+    const { data, error } = await supabase.from("taiwan_concerts").insert(rec).select();
+    if (error) { alert("新增失敗:" + error.message); return; }
+    setRows(rs => [...rs, ...(data || [])].sort((a, b) => String(a.event_date).localeCompare(String(b.event_date))));
+    setForm({ name: "", event_date: "", venue: "", url: "", aliases: "" }); setAdding(false);
+  };
+
+  const today = new Date(); const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const enriched = useMemo(() => {
+    // 同名稱+同場地+同狀態 的多日演出合併成一張卡,以首日排序
+    const map = new Map();
+    rows.forEach(r => {
+      const k = `${r.name}|${r.venue || ""}|${r.status}`;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(r);
+    });
+    return Array.from(map.values()).map(grp => {
+      grp.sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+      const first = grp[0];
+      const linked = [...new Set(grp.flatMap(g => g.linked_event_ids || []))];
+      const excluded = [...new Set(grp.flatMap(g => g.excluded_event_ids || []))];
+      const merged = { ...first, linked_event_ids: linked, excluded_event_ids: excluded };
+      const matches = concertMatchEvents(merged, events);
+      // 回看過期:整組最後一天已過才算過期
+      const lastDate = grp[grp.length - 1].event_date;
+      return { ...merged, ids: grp.map(g => g.id), dates: grp.map(g => g.event_date), lastDate, matches, total: matches.reduce((s, m) => s + m.qty, 0) };
+    }).sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+  }, [rows, events]);
+
+  const kw = q.trim().toLowerCase();
+  const filt = enriched.filter(r => {
+    if (kw && !(`${r.name} ${r.venue || ""} ${(r.aliases || []).join(" ")}`.toLowerCase().includes(kw))) return false;
+    if (onlyMine && r.matches.length === 0) return false;
+    if (!showPast && String(r.lastDate) < todayStr) return false;
+    return true;
+  });
+  const pending = filt.filter(r => r.status === "pending");
+  const approved = filt.filter(r => r.status !== "pending" && r.status !== "rejected");
+  const byMonth = {};
+  approved.forEach(r => { const k = String(r.event_date).slice(0, 7); (byMonth[k] = byMonth[k] || []).push(r); });
+  const wk = ["日", "一", "二", "三", "四", "五", "六"];
+  const fmtDate = (d) => { const dt = new Date(d + "T00:00:00"); return isNaN(dt) ? d : `${dt.getMonth() + 1}/${dt.getDate()} (${wk[dt.getDay()]})`; };
+  const myTotal = approved.reduce((s, r) => s + r.total, 0);
+  const inp = { padding: "7px 10px", borderRadius: 8, border: "1px solid #d4d0c8", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box", width: "100%" };
+  const btn = (bg, color) => ({ padding: "5px 12px", borderRadius: 7, border: "1px solid #d4d0c8", background: bg, color, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" });
+
+  const Card = ({ r, isPending }) => (
+    <div style={{ background: "#fff", border: `1px solid ${isPending ? "#e0c070" : "#e0dcd2"}`, borderRadius: 12, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ minWidth: 70, fontWeight: 800, color: "#8b7355", fontSize: 14 }}>{fmtDate(r.event_date)}{r.dates.length > 1 && <div style={{ fontSize: 11, fontWeight: 700, color: "#a09888" }}>共 {r.dates.length} 天</div>}</div>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "#3a3329" }}>{r.name}</div>
+          {r.dates.length > 1 && <div style={{ fontSize: 12, color: "#5a5046", marginTop: 2, fontWeight: 600 }}>🗓 演出日:{r.dates.map(d => fmtDate(d)).join("、")}</div>}
+          <div style={{ fontSize: 12, color: "#8a8272", marginTop: 2 }}>📍 {r.venue || "場地未定"}{r.source && r.source !== "manual" ? ` · ${r.source}` : ""}{isPending && r.confidence != null ? ` · 信心 ${Math.round(r.confidence * 100)}%` : ""}</div>
+        </div>
+        {r.total > 0 && <div style={{ padding: "4px 12px", borderRadius: 14, background: "#8b7355", color: "#fff", fontWeight: 800, fontSize: 13, whiteSpace: "nowrap" }}>🎫 共 {r.total} 張</div>}
+      </div>
+      {r.matches.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {r.matches.map(m => (
+            <button key={m.event.id} onClick={() => jumpToEvent(m.event.id, m.event.status)} title={m.manual ? "手動連結" : "自動比對"} style={{ padding: "3px 10px", borderRadius: 8, border: "1px solid #d4d0c8", background: m.manual ? "#e8f0e4" : "#faf9f6", fontSize: 11, fontWeight: 600, color: "#5a5046", cursor: "pointer", fontFamily: "inherit" }}>
+              {m.manual ? "🔗 " : ""}{m.event.name} · {m.qty}張 →
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {isPending && <button style={btn("#e8f0e4", "#4a7a3a")} onClick={() => patch(r.ids, { status: "approved" })}>✓ 核准</button>}
+        {isPending && <button style={btn("#fdeaea", "#b03a3a")} onClick={() => patch(r.ids, { status: "rejected" })}>✕ 略過</button>}
+        <button style={btn("#fff", "#8b7355")} onClick={() => setLinkingId(linkingId === r.ids[0] ? null : r.ids[0])}>🔗 連結場次</button>
+        {r.url && <a href={r.url} target="_blank" rel="noreferrer" style={{ ...btn("#fff", "#8b7355"), textDecoration: "none" }}>來源</a>}
+        <button style={btn("#fff", "#b03a3a")} onClick={() => remove(r)}>刪除</button>
+      </div>
+      {linkingId === r.ids[0] && (
+        <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+          <div style={{ fontSize: 11, color: "#8a8272" }}>勾選=算進此演出;取消自動比對錯的也是這裡</div>
+          {events.filter(e => e.status !== "done" || r.matches.some(m => m.event.id === e.id)).map(e => {
+            const on = r.matches.some(m => m.event.id === e.id);
+            return (
+              <label key={e.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: "pointer" }}>
+                <input type="checkbox" checked={on} onChange={() => {
+                  const linked = new Set(r.linked_event_ids || []); const excl = new Set(r.excluded_event_ids || []);
+                  if (on) { linked.delete(e.id); excl.add(e.id); } else { excl.delete(e.id); linked.add(e.id); }
+                  patch(r.ids, { linked_event_ids: [...linked], excluded_event_ids: [...excl] });
+                }} />
+                {e.name}
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 搜尋演出 / 場地" style={{ ...inp, flex: 1, minWidth: 160 }} />
+        <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={onlyMine} onChange={e => setOnlyMine(e.target.checked)} />只看我有訂的</label>
+        <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={showPast} onChange={e => setShowPast(e.target.checked)} />含已過期</label>
+        <button style={btn("#8b7355", "#fff")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
+        <button style={btn("#fff", "#8b7355")} onClick={load}>↻ 重新整理</button>
+      </div>
+      {adding && (
+        <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
+          <input style={inp} placeholder="演出名稱 *" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+          <input style={inp} type="date" value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} />
+          <input style={inp} placeholder="場地 (例:台北小巨蛋)" value={form.venue} onChange={e => setForm({ ...form, venue: e.target.value })} />
+          <input style={inp} placeholder="連結 (選填)" value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} />
+          <input style={{ ...inp, gridColumn: "1 / -1" }} placeholder="別名 (選填,逗號分隔,例:BTS, 防彈)" value={form.aliases} onChange={e => setForm({ ...form, aliases: e.target.value })} />
+          <button style={btn("#8b7355", "#fff")} onClick={submitAdd}>儲存</button>
+        </div>
+      )}
+      {loading && <div style={{ color: "#8a8272", fontSize: 13 }}>載入中…</div>}
+      {err && (
+        <div style={{ background: "#fdf3e0", border: "1px solid #e0c070", borderRadius: 10, padding: 12, fontSize: 12, color: "#7a5a10", lineHeight: 1.7 }}>
+          ⚠️ {err}<br />若是第一次使用,請先到 Supabase 的 SQL Editor 執行建立 taiwan_concerts 資料表的 SQL。
+        </div>
+      )}
+      {!loading && !err && (
+        <div style={{ fontSize: 12, color: "#8a8272" }}>共 {approved.length} 場 · 我有訂的合計 <b style={{ color: "#8b7355" }}>{myTotal}</b> 張{pending.length > 0 ? ` · 待審 ${pending.length} 場` : ""}</div>
+      )}
+      {pending.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#a07a10" }}>🟡 待審 ({pending.length})</div>
+          {pending.map(r => <Card key={r.ids[0]} r={r} isPending />)}
+        </div>
+      )}
+      {Object.keys(byMonth).sort().map(m => (
+        <div key={m} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#5a5046", borderBottom: "2px solid #e0dcd2", paddingBottom: 3 }}>{m.replace("-", " 年 ")} 月</div>
+          {byMonth[m].map(r => <Card key={r.ids[0]} r={r} />)}
+        </div>
+      ))}
+      {!loading && !err && approved.length === 0 && pending.length === 0 && <div style={{ color: "#a09888", fontSize: 13, textAlign: "center", padding: 30 }}>沒有符合的演出,可用「＋ 手動新增」,或等自動爬取上線</div>}
     </div>
   );
 }
@@ -4255,7 +4488,7 @@ function MainApp() {
           </div>
           <div style={{ display:"flex",gap:4,flexWrap:"wrap",alignItems:"center" }}>
             {(() => {
-              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`}].map(t=>(
+              return [{key:"active",label:`進行中 (${activeEvents.length})`},{key:"empty",label:`📭 有開單但沒人訂${emptyEvents.length>0?` (${emptyEvents.length})`:""}`},{key:"picked",label:`已取票 (${pickedEvents.length})`},{key:"done",label:`已完成 (${doneEvents.length})`},{key:"buyers",label:`👤 訂購人 (${buyersAggregated.length})`},{key:"identity",label:`📇 實名簿 (${identityCatalog.length})`},{key:"orderlog",label:`📅 訂購日曆`},{key:"timeline",label:`🕒 時間軸`},{key:"concerts",label:`🎵 演唱會日曆`}].map(t=>(
               <button key={t.key} onClick={()=>{setTab(t.key);setSearch("");setExpandedId(null);setShowLog(false);}} style={{ padding:"7px 16px",borderRadius:8,border:"none",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:tab===t.key&&!showLog?"#8b7355":"transparent",color:tab===t.key&&!showLog?"#fff":"#a09888" }}>{t.label}</button>
               ));
             })()}
@@ -5457,6 +5690,8 @@ function MainApp() {
             })()}
           </>)}
         </div>)}
+
+        {!showLog&&tab==="concerts"&&(<ConcertCalendarTab events={events} jumpToEvent={jumpToEvent} />)}
 
         {/* Timeline (時間軸) view */}
         {!showLog&&tab==="timeline"&&(<div style={{ display:"flex",flexDirection:"column",gap:12 }}>
