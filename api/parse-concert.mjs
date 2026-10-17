@@ -67,15 +67,16 @@ ${pageText}`;
     const ar = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5", max_tokens: 800, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5", max_tokens: 3000, messages: [{ role: "user", content: prompt }] }),
       signal: AbortSignal.timeout(40000),
     });
     const aj = await ar.json();
     if (!ar.ok) return res.status(502).json({ error: "AI 服務錯誤:" + (aj?.error?.message || ar.status) });
     const out = (aj.content || []).map(c => c.text || "").join("");
     const m = out.match(/\{[\s\S]*\}/);
-    if (!m) return res.status(502).json({ error: "AI 回傳格式無法解析" });
-    const parsed = JSON.parse(m[0]);
+    if (!m) return res.status(502).json({ error: `AI 回傳格式無法解析 (stop_reason=${aj.stop_reason || "?"}) 原始回覆:` + (out.slice(0, 300) || "(空白)") });
+    let parsed;
+    try { parsed = JSON.parse(m[0]); } catch (e) { return res.status(502).json({ error: "AI 回傳的 JSON 有誤:" + m[0].slice(0, 300) }); }
     parsed.dates = (parsed.dates || []).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d));
     return res.status(200).json({ ...parsed, url: sourceUrl });
   } catch (e) {
