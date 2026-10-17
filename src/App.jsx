@@ -2098,6 +2098,34 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ name: "", event_date: "", venue: "", url: "", aliases: "" });
   const [linkingId, setLinkingId] = useState(null);
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [pasteText, setPasteText] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [urlErr, setUrlErr] = useState("");
+  const [draft, setDraft] = useState(null); // {name, venue, datesText, aliases, url, confidence, notes}
+
+  const parseUrl = async () => {
+    if (!urlInput.trim() && !pasteText.trim()) { setUrlErr("請貼上網址或頁面文字"); return; }
+    setParsing(true); setUrlErr(""); setDraft(null);
+    try {
+      const r = await fetch("/api/parse-concert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pasteText.trim() ? { text: pasteText } : { url: urlInput.trim() }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { setUrlErr(j.error || `解析失敗 (${r.status})`); }
+      else if (!j.dates || j.dates.length === 0) { setUrlErr("沒有在頁面找到演出日期,可能不是演出頁面,或請改貼頁面文字"); }
+      else setDraft({ name: j.name || "", venue: j.venue || "", datesText: j.dates.join("\n"), aliases: (j.aliases || []).join(", "), url: urlInput.trim() ? (j.url || urlInput.trim()) : "", confidence: j.confidence ?? 0.8, notes: j.notes || "" });
+    } catch (e) { setUrlErr("無法連線到解析服務:" + e.message); }
+    setParsing(false);
+  };
+  const saveDraft = async () => {
+    const dates = draft.datesText.split(/[\s,，、]+/).map(x => x.trim()).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
+    if (!draft.name.trim() || dates.length === 0) { alert("名稱與至少一個日期 (YYYY-MM-DD) 必填"); return; }
+    const recs = dates.map(d => ({ name: draft.name.trim(), event_date: d, venue: draft.venue.trim() || null, url: draft.url || null, aliases: draft.aliases.split(/[,，、]/).map(x => x.trim()).filter(Boolean), source: "url", confidence: draft.confidence, status: "approved" }));
+    const { error } = await supabase.from("taiwan_concerts").upsert(recs, { onConflict: "name,event_date", ignoreDuplicates: true });
+    if (error) { alert("新增失敗:" + error.message); return; }
+    setDraft(null); setUrlInput(""); setPasteText(""); setUrlOpen(false); setUrlErr("");
+    load();
+  };
 
   const load = async () => {
     if (!SUPABASE_READY) { setLoading(false); setErr("尚未設定雲端 (Supabase),無法使用演唱會日曆"); return; }
@@ -2228,9 +2256,35 @@ function ConcertCalendarTab({ events, jumpToEvent }) {
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 搜尋演出 / 場地" style={{ ...inp, flex: 1, minWidth: 160 }} />
         <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={onlyMine} onChange={e => setOnlyMine(e.target.checked)} />只看我有訂的</label>
         <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", cursor: "pointer" }}><input type="checkbox" checked={showPast} onChange={e => setShowPast(e.target.checked)} />含已過期</label>
-        <button style={btn("#8b7355", "#fff")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
+        <button style={btn("#8b7355", "#fff")} onClick={() => { setUrlOpen(o => !o); setUrlErr(""); }}>🔗 貼網址新增</button>
+        <button style={btn("#fff", "#8b7355")} onClick={() => setAdding(a => !a)}>＋ 手動新增</button>
         <button style={btn("#fff", "#8b7355")} onClick={load}>↻ 重新整理</button>
       </div>
+      {urlOpen && (
+        <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "#8a8272" }}>貼上演唱會頁面網址(寬宏、拓元、KKTIX、iBon、新聞都可以),AI 會抓出名稱、日期、場地,讓你確認後再存。</div>
+          <input style={inp} placeholder="https://..." value={urlInput} onChange={e => setUrlInput(e.target.value)} />
+          <details style={{ fontSize: 12, color: "#8a8272" }}>
+            <summary style={{ cursor: "pointer" }}>網址抓不到?改貼頁面文字</summary>
+            <textarea style={{ ...inp, minHeight: 90, marginTop: 6 }} placeholder="在網頁上全選複製,貼在這裡(填了文字就會優先用文字)" value={pasteText} onChange={e => setPasteText(e.target.value)} />
+          </details>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={btn("#8b7355", "#fff")} onClick={parseUrl} disabled={parsing}>{parsing ? "解析中…請稍候" : "解析"}</button>
+            <button style={btn("#fff", "#8a8272")} onClick={() => { setUrlOpen(false); setDraft(null); setUrlErr(""); }}>取消</button>
+          </div>
+          {urlErr && <div style={{ fontSize: 12, color: "#b03a3a" }}>⚠️ {urlErr}</div>}
+          {draft && (
+            <div style={{ borderTop: "1px dashed #e0dcd2", paddingTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 8 }}>
+              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#4a7a3a", fontWeight: 700 }}>✅ 解析完成,請確認後儲存{draft.notes ? `(AI 備註:${draft.notes})` : ""}</div>
+              <input style={inp} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="演出名稱" />
+              <input style={inp} value={draft.venue} onChange={e => setDraft({ ...draft, venue: e.target.value })} placeholder="場地" />
+              <textarea style={{ ...inp, minHeight: 70 }} value={draft.datesText} onChange={e => setDraft({ ...draft, datesText: e.target.value })} placeholder="日期,每行一個 YYYY-MM-DD" />
+              <input style={inp} value={draft.aliases} onChange={e => setDraft({ ...draft, aliases: e.target.value })} placeholder="別名 (逗號分隔)" />
+              <button style={btn("#8b7355", "#fff")} onClick={saveDraft}>儲存到日曆</button>
+            </div>
+          )}
+        </div>
+      )}
       {adding && (
         <div style={{ background: "#faf9f6", border: "1px solid #e0dcd2", borderRadius: 12, padding: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8 }}>
           <input style={inp} placeholder="演出名稱 *" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
